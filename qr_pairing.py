@@ -1,5 +1,5 @@
 """
-Pulse Remote - QR Code Generation & Local Wi-Fi Pairing Payload
+EasyConnect - QR Code Generation & Local Wi-Fi Pairing Payload
 """
 import io
 import os

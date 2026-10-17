@@ -1,5 +1,5 @@
 """
-Pulse Remote v2.0 - Configuration & Security Policies
+EasyConnect v2.0 - Configuration & Security Policies
 """
 import sys
 import os
@@ -36,7 +36,9 @@ def get_or_create_device_id() -> str:
 # Server Settings
 HOST = "0.0.0.0"
 PORT = 8000
-SERVER_NAME = "Pulse Remote Agent v2.0"
+SERVER_NAME = "EasyConnect Agent v2.1"
+APP_VERSION = "2.1.0"
+GITHUB_REPO = "khushal-jangid/pulse-remote-pc"
 
 # Device Information
 DEVICE_ID = get_or_create_device_id()

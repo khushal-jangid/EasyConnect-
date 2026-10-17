@@ -1,5 +1,5 @@
 """
-Pulse Remote - Secure File Explorer, Download & Upload
+EasyConnect - Secure File Explorer, Download & Upload
 """
 import os
 import time

@@ -1,5 +1,5 @@
 """
-Pulse Remote v2.0 - Security Activity Audit Logger
+EasyConnect v2.0 - Security Activity Audit Logger
 """
 import time
 import threading

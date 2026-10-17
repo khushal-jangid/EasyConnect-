@@ -1,11 +1,28 @@
 """
-Pulse Remote v2.0 - High-Speed Multi-Monitor Screen Capture & Coordinate Mapper
+EasyConnect v2.0 - High-Speed Multi-Monitor Screen Capture, Coordinate Mapper & 60 FPS WebRTC Engine
 """
 import io
+import time
 import base64
+import asyncio
+import fractions
 from typing import List, Dict, Any, Optional
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw
+
 import config
+
+try:
+    import av
+    from aiortc import VideoStreamTrack
+    from aiortc.mediastreams import MediaStreamError
+    HAS_WEBRTC = True
+except ImportError:
+    VideoStreamTrack = object
+    MediaStreamError = Exception
+    HAS_WEBRTC = False
+
 
 class ScreenCapture:
     """Ultra-fast multi-monitor screen capture engine with dynamic coordinate mapping."""
@@ -25,8 +42,6 @@ class ScreenCapture:
         monitors = []
         if self.use_mss and self.sct:
             try:
-                # mss.monitors[0] is the virtual canvas of all monitors combined.
-                # mss.monitors[1..n] are the individual monitors.
                 raw_monitors = self.sct.monitors[1:] if len(self.sct.monitors) > 1 else self.sct.monitors
                 for idx, m in enumerate(raw_monitors, start=1):
                     is_primary = (m.get("left") == 0 and m.get("top") == 0) or idx == 1
@@ -44,7 +59,6 @@ class ScreenCapture:
             except Exception:
                 pass
 
-        # Fallback for single monitor
         monitors.append({
             "id": 1,
             "name": "Primary Display",
@@ -80,9 +94,7 @@ class ScreenCapture:
         return monitors[0] if monitors else {"width": 1920, "height": 1080, "left": 0, "top": 0}
 
     def map_relative_to_screen(self, rel_x: float, rel_y: float, monitor_id: Optional[int] = None) -> tuple[int, int]:
-        """
-        Map normalized [0..1] touch coordinates on selected monitor to absolute screen pixel coordinates.
-        """
+        """Map normalized [0..1] touch coordinates on selected monitor to absolute screen pixel coordinates."""
         m_id = monitor_id or self.selected_monitor_id
         monitors = self.get_monitors_list()
         target = next((m for m in monitors if m["id"] == m_id), monitors[0])
@@ -92,11 +104,9 @@ class ScreenCapture:
         return abs_x, abs_y
 
     def capture_frame_bytes(self, quality: int = config.SCREEN_JPEG_QUALITY, max_width: int = 1280, monitor_id: Optional[int] = None) -> bytes:
-        """
-        Capture selected monitor, downscale for low-latency streaming, and compress to JPEG.
-        """
+        """Capture selected monitor, downscale for low-latency streaming, and compress to JPEG."""
         target_id = monitor_id or self.selected_monitor_id
-        img = None
+        frame_bgr = None
 
         if self.use_mss and self.sct:
             try:
@@ -104,20 +114,29 @@ class ScreenCapture:
                 idx = min(max(0, target_id - 1), len(raw_monitors) - 1)
                 mon = raw_monitors[idx]
                 raw = self.sct.grab(mon)
-                img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+                arr = np.frombuffer(raw.raw, dtype=np.uint8).reshape((raw.height, raw.width, 4))
+                frame_bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
             except Exception:
-                img = None
+                frame_bgr = None
 
-        if img is None:
-            try:
-                from PIL import ImageGrab
-                img = ImageGrab.grab()
-            except Exception:
-                img = Image.new("RGB", (1280, 720), color=(15, 23, 42))
-                draw = ImageDraw.Draw(img)
-                draw.text((480, 340), f"Display {target_id} Locked or Idle", fill=(0, 242, 254))
+        if frame_bgr is not None:
+            if frame_bgr.shape[1] > max_width:
+                aspect = frame_bgr.shape[0] / frame_bgr.shape[1]
+                new_h = int(max_width * aspect)
+                frame_bgr = cv2.resize(frame_bgr, (max_width, new_h), interpolation=cv2.INTER_LINEAR)
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+            _, encimg = cv2.imencode(".jpg", frame_bgr, encode_param)
+            return encimg.tobytes()
 
-        # Downscale for smooth mobile streaming
+        # PIL Fallback
+        try:
+            from PIL import ImageGrab
+            img = ImageGrab.grab()
+        except Exception:
+            img = Image.new("RGB", (1280, 720), color=(15, 23, 42))
+            draw = ImageDraw.Draw(img)
+            draw.text((480, 340), f"Display {target_id} Locked or Idle", fill=(0, 242, 254))
+
         if img.width > max_width:
             aspect = img.height / img.width
             new_height = int(max_width * aspect)
@@ -133,5 +152,64 @@ class ScreenCapture:
         encoded = base64.b64encode(jpeg_bytes).decode("ascii")
         return f"data:image/jpeg;base64,{encoded}"
 
-# Global instance
+
+# Global screen instance
 screen = ScreenCapture()
+
+
+class ScreenStreamTrack(VideoStreamTrack):
+    """Real-time 60 FPS hardware-accelerated screen stream track for WebRTC."""
+    kind = "video"
+
+    def __init__(self, fps: int = 60, max_width: int = 1280):
+        super().__init__()
+        self.fps = fps
+        self.max_width = max_width
+        self._step = int((1.0 / fps) * 90000)
+        self._timestamp = 0
+        self._start_time = None
+        self._last_frame_bgr = None
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+
+        if self._start_time is None:
+            self._start_time = time.time()
+            self._timestamp = 0
+        else:
+            self._timestamp += self._step
+            target_time = self._start_time + (self._timestamp / 90000)
+            wait = target_time - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+        frame_bgr = None
+        target_id = screen.selected_monitor_id
+        if screen.use_mss and screen.sct:
+            try:
+                raw_monitors = screen.sct.monitors[1:] if len(screen.sct.monitors) > 1 else screen.sct.monitors
+                idx = min(max(0, target_id - 1), len(raw_monitors) - 1)
+                mon = raw_monitors[idx]
+                raw = screen.sct.grab(mon)
+                arr = np.frombuffer(raw.raw, dtype=np.uint8).reshape((raw.height, raw.width, 4))
+                frame_bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+                if frame_bgr.shape[1] > self.max_width:
+                    aspect = frame_bgr.shape[0] / frame_bgr.shape[1]
+                    new_h = int(self.max_width * aspect)
+                    frame_bgr = cv2.resize(frame_bgr, (self.max_width, new_h), interpolation=cv2.INTER_LINEAR)
+            except Exception:
+                frame_bgr = None
+
+        if frame_bgr is None:
+            if self._last_frame_bgr is not None:
+                frame_bgr = self._last_frame_bgr
+            else:
+                frame_bgr = np.zeros((720, 1280, 3), dtype=np.uint8)
+        else:
+            self._last_frame_bgr = frame_bgr
+
+        frame = av.VideoFrame.from_ndarray(frame_bgr, format="bgr24")
+        frame.pts = self._timestamp
+        frame.time_base = fractions.Fraction(1, 90000)
+        return frame

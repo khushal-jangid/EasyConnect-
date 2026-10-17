@@ -1,9 +1,9 @@
 @echo off
-title Pulse Remote - Build Standalone EXE
+title EasyConnect - Build Standalone EXE
 cd /d "%~dp0"
 
 echo ======================================================
-echo    ⚡ Building Standalone Windows Executable (.exe)
+echo    ⚡ EasyConnect - Building Standalone EXE (.exe)
 echo ======================================================
 echo.
 

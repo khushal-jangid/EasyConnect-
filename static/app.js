@@ -1,15 +1,18 @@
-/** Pulse Remote - Enhanced Mobile Controller */
+/** EasyConnect - Enhanced Mobile Controller */
 (function () {
   let ws = null;
-  let sessionToken = localStorage.getItem("pulse_session_token");
+  let sessionToken = localStorage.getItem("easyconnect_session_token") || localStorage.getItem("pulse_session_token");
   let pcDeviceName = "Windows PC";
   let isConnected = false;
   let sensitivity = parseFloat(localStorage.getItem("pulse_sens") || "1.0");
   let activeTab = "trackpad";
   
-  // Screen & Camera State
+  // Screen & Camera & Window State
   let isScreenStreaming = false;
   let isWebcamStreaming = false;
+  let isWindowStreaming = false;
+  let activeWindowHwnd = null;
+  let cachedAppWindows = [];
   let monitorsList = [];
   let selectedMonitorId = 1;
   let isFindPcRinging = false;
@@ -66,6 +69,7 @@
     setupKeysAndShortcuts();
     setupScreenViewer();
     setupWebcam();
+    setupAppWindowsMonitor();
     setupMediaControls();
     setupFileManager();
     setupClipboard();
@@ -76,6 +80,7 @@
     setupBrightnessControl();
     setupSecurityControls();
     setupLiveHUDLoop();
+    setupAutoUpdater();
 
     const urlParams = new URLSearchParams(window.location.search);
     const pairToken = urlParams.get("pair");
@@ -136,6 +141,7 @@
     ws.onopen = () => {
       reconnectAttempts = 0;
       ws.send(JSON.stringify({ event: "auth", data: { session_token: sessionToken } }));
+      startProximityPing();
     };
 
     ws.onmessage = (e) => {
@@ -147,6 +153,10 @@
 
     ws.onclose = () => {
       isConnected = false;
+      if (proximityPingInterval) {
+        clearInterval(proximityPingInterval);
+        proximityPingInterval = null;
+      }
       reconnectAttempts++;
       latencyBadge.textContent = `Reconnecting (${reconnectAttempts})...`;
       setTimeout(() => {
@@ -156,6 +166,27 @@
 
     ws.onerror = () => { ws.close(); };
   }
+
+  let proximityPingInterval = null;
+  function startProximityPing() {
+    if (proximityPingInterval) clearInterval(proximityPingInterval);
+    proximityPingInterval = setInterval(() => {
+      if (isConnected && ws && ws.readyState === WebSocket.OPEN) {
+        sendWS("ping:proximity");
+      }
+    }, 3000);
+  }
+
+  window.addEventListener("pagehide", () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.close(); } catch (e) {}
+    }
+  });
+  window.addEventListener("beforeunload", () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.close(); } catch (e) {}
+    }
+  });
 
   function sendWS(event, data = {}) {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -176,8 +207,10 @@
       sendWS("monitors:list");
       sendWS("app:list");
       sendWS("custom_remotes:get");
+      sendWS("sentry:get_status");
       if (activeTab === "files") fetchFileList();
       if (activeTab === "system") refreshSystemData();
+      if (activeTab === "security") sendWS("security:logs");
     } else if (event === "auth_error") {
       localStorage.removeItem("pulse_session_token");
       sessionToken = null;
@@ -188,6 +221,10 @@
       alert(`⚠️ ${data.message}`);
     } else if (event === "screen:frame_data") {
       renderScreenFrame(data.frame);
+    } else if (event === "webrtc:answer") {
+      if (window.handleWebRTCAnswer) window.handleWebRTCAnswer(data);
+    } else if (event === "webrtc:error") {
+      if (window.handleWebRTCError) window.handleWebRTCError(data);
     } else if (event === "webcam:frame_data") {
       renderWebcamFrame(data.frame);
     } else if (event === "monitors:list_data") {
@@ -219,18 +256,42 @@
       showToast(data.message, "error");
     } else if (event === "brightness:changed") {
       updateBrightnessUI(data.level);
+    } else if (event === "system:update_info") {
+      if (window.renderUpdateBanner) window.renderUpdateBanner(data);
+    } else if (event === "system:update_result") {
+      vibrate(25);
+      showToast(data.message, data.success ? "success" : "error");
+    } else if (event === "security:settings") {
+      if (data.guard_active !== undefined) {
+        const chk = document.getElementById("toggle-cctv-guard");
+        if (chk) chk.checked = !!data.guard_active;
+      }
+      if (data.walkaway_enabled !== undefined) {
+        const chk = document.getElementById("toggle-walkaway-lock");
+        if (chk) chk.checked = !!data.walkaway_enabled;
+      }
+      if (data.sentry) updateSentryUI(data.sentry);
+      if (data.last_intruder && data.last_intruder.photo) {
+        updateIntruderPreview(data.last_intruder);
+      }
     } else if (event === "guard:status") {
       vibrate(20);
       showToast(data.message, data.active ? "success" : "info");
       const chk = document.getElementById("toggle-cctv-guard");
-      if (chk) chk.checked = data.active;
+      if (chk) chk.checked = !!data.active;
     } else if (event === "guard:intruder_alert") {
       handleIntruderAlert(data);
     } else if (event === "settings:walkaway_status") {
       vibrate(15);
       showToast(`Walk-Away Auto-Lock ${data.enabled ? "Enabled" : "Disabled"}`, "info");
       const chk = document.getElementById("toggle-walkaway-lock");
-      if (chk) chk.checked = data.enabled;
+      if (chk) chk.checked = !!data.enabled;
+    } else if (event === "sentry:status") {
+      updateSentryUI(data);
+    } else if (event === "sentry:triggered") {
+      handleSentryTriggered(data);
+    } else if (event === "security:logs_data") {
+      renderSecurityLogs(data.logs || []);
     } else if (event === "files:list_data") {
       renderFileList(data);
     } else if (event === "devices:list_data") {
@@ -244,6 +305,14 @@
     } else if (event === "devices:all_revoked") {
       alert("All devices disconnected.");
       window.location.reload();
+    } else if (event === "windows:list_data" || event === "windows:thumbnails_data") {
+      renderAppWindows(data.windows || []);
+    } else if (event === "windows:frame_data") {
+      renderWindowStreamFrame(data);
+    } else if (event === "windows:action_result") {
+      vibrate(15);
+      showToast(data.success ? `Window action '${data.action}' successful` : "Action failed", data.success ? "success" : "error");
+      setTimeout(fetchAppWindows, 350);
     }
   }
 
@@ -266,9 +335,17 @@
         if (tab !== "screen" && isWebcamStreaming) {
           document.getElementById("btn-toggle-webcam")?.click();
         }
+        if (tab !== "screen" && isWindowStreaming) {
+          window.stopWindowStream?.();
+        }
 
         if (tab === "screen") sendWS("monitors:list");
         if (tab === "files") fetchFileList();
+        if (tab === "security") {
+          sendWS("sentry:get_status");
+          sendWS("security:get_settings");
+          sendWS("security:logs");
+        }
         if (tab === "system") {
           refreshSystemData();
           if (!statsInterval) statsInterval = setInterval(refreshSystemData, 2000);
@@ -295,7 +372,7 @@
       });
     });
 
-    // 2. Live View Sub-Pills (screen, webcam)
+    // 2. Live View Sub-Pills (screen, windows, webcam)
     document.querySelectorAll(".view-pill").forEach((pill) => {
       pill.addEventListener("click", () => {
         vibrate(10);
@@ -304,6 +381,12 @@
         const view = pill.dataset.view;
         document.querySelectorAll(".view-panel").forEach((p) => p.classList.remove("active"));
         document.getElementById(`view-${view}`)?.classList.add("active");
+
+        if (view === "windows") {
+          fetchAppWindows();
+        } else if (isWindowStreaming) {
+          window.stopWindowStream?.();
+        }
       });
     });
 
@@ -325,6 +408,27 @@
     sendWS("system:stats");
     sendWS("devices:list");
   }
+  let gestureHudTimeout = null;
+  function showGestureHUD(text) {
+    const el = document.getElementById("gesture-indicator");
+    if (!el) return;
+    el.textContent = text;
+    el.classList.add("visible");
+    if (gestureHudTimeout) clearTimeout(gestureHudTimeout);
+    gestureHudTimeout = setTimeout(() => {
+      el.classList.remove("visible");
+    }, 750);
+  }
+
+  function getTouchesCenter(touches) {
+    let x = 0, y = 0;
+    for (let i = 0; i < touches.length; i++) {
+      x += touches[i].clientX;
+      y += touches[i].clientY;
+    }
+    return { x: x / touches.length, y: y / touches.length };
+  }
+
   function setupTrackpad() {
     const surface = document.getElementById("touch-surface");
     const pointer = document.getElementById("virtual-pointer");
@@ -340,61 +444,208 @@
       });
     });
 
-    let lastX = 0;
-    let lastY = 0;
     let touchStartTime = 0;
-    let hasMoved = false;
+    let maxFingers = 0;
+    let startCenter = { x: 0, y: 0 };
+    let lastCenter = { x: 0, y: 0 };
+    let initialPinchDist = 0;
+    let lastPinchDist = 0;
+    let pinchAccum = 0;
+    let totalTravelDist = 0;
+    let swipeTriggered = false;
 
     surface.addEventListener("touchstart", (e) => {
-      touchStartTime = Date.now();
-      hasMoved = false;
-      if (e.touches.length === 1) {
-        lastX = e.touches[0].clientX;
-        lastY = e.touches[0].clientY;
+      const count = e.touches.length;
+      if (count === 1) {
+        touchStartTime = Date.now();
+        maxFingers = 1;
+        totalTravelDist = 0;
+        swipeTriggered = false;
+        pinchAccum = 0;
+        const t = e.touches[0];
+        startCenter = { x: t.clientX, y: t.clientY };
+        lastCenter = { x: t.clientX, y: t.clientY };
+
         const rect = surface.getBoundingClientRect();
-        pointer.style.left = (lastX - rect.left) + "px";
-        pointer.style.top = (lastY - rect.top) + "px";
+        pointer.style.left = (t.clientX - rect.left) + "px";
+        pointer.style.top = (t.clientY - rect.top) + "px";
         pointer.style.display = "block";
-      } else if (e.touches.length === 2) {
-        lastY = e.touches[0].clientY;
+      } else {
+        pointer.style.display = "none";
+        maxFingers = Math.max(maxFingers, count);
+        const center = getTouchesCenter(e.touches);
+        startCenter = center;
+        lastCenter = center;
+        if (count === 2) {
+          const d = Math.hypot(e.touches[1].clientX - e.touches[0].clientX, e.touches[1].clientY - e.touches[0].clientY);
+          initialPinchDist = d;
+          lastPinchDist = d;
+          pinchAccum = 0;
+        }
       }
     }, { passive: false });
 
     surface.addEventListener("touchmove", (e) => {
       e.preventDefault();
-      if (e.touches.length === 1) {
-        const curX = e.touches[0].clientX;
-        const curY = e.touches[0].clientY;
-        const dx = curX - lastX;
-        const dy = curY - lastY;
-        if (Math.abs(dx) > 1.0 || Math.abs(dy) > 1.0) {
-          hasMoved = true;
+      const count = e.touches.length;
+      maxFingers = Math.max(maxFingers, count);
+
+      if (count === 1 && maxFingers === 1) {
+        // --- 1 Finger: Smooth Cursor Movement ---
+        const t = e.touches[0];
+        const dx = t.clientX - lastCenter.x;
+        const dy = t.clientY - lastCenter.y;
+        totalTravelDist += Math.hypot(dx, dy);
+
+        if (Math.abs(dx) > 0.4 || Math.abs(dy) > 0.4) {
           sendWS("mouse:move", { dx, dy, sensitivity });
         }
-        lastX = curX;
-        lastY = curY;
+        lastCenter = { x: t.clientX, y: t.clientY };
+
         const rect = surface.getBoundingClientRect();
-        pointer.style.left = Math.max(10, Math.min(rect.width - 10, curX - rect.left)) + "px";
-        pointer.style.top = Math.max(10, Math.min(rect.height - 10, curY - rect.top)) + "px";
-      } else if (e.touches.length === 2) {
-        const curY = e.touches[0].clientY;
-        const dy = (curY - lastY) / 7;
-        if (Math.abs(dy) > 0.4) {
-          hasMoved = true;
-          sendWS("mouse:scroll", { dy });
+        pointer.style.left = Math.max(10, Math.min(rect.width - 10, t.clientX - rect.left)) + "px";
+        pointer.style.top = Math.max(10, Math.min(rect.height - 10, t.clientY - rect.top)) + "px";
+
+      } else if (count === 2) {
+        // --- 2 Fingers: Pinch-to-Zoom OR Smooth 2D Scroll ---
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const curDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        const curCenter = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
+
+        const distDiff = curDist - lastPinchDist;
+        const centerDx = curCenter.x - lastCenter.x;
+        const centerDy = curCenter.y - lastCenter.y;
+
+        totalTravelDist += Math.hypot(centerDx, centerDy) + Math.abs(distDiff);
+
+        // Compare pinch vs scroll displacement from initial contact
+        const pinchDeltaFromStart = Math.abs(curDist - initialPinchDist);
+        const scrollDeltaFromStart = Math.hypot(curCenter.x - startCenter.x, curCenter.y - startCenter.y);
+
+        if (pinchDeltaFromStart > 14 && pinchDeltaFromStart > scrollDeltaFromStart * 0.6) {
+          // Pinch Zoom Action
+          pinchAccum += distDiff;
+          lastPinchDist = curDist;
+          lastCenter = curCenter;
+
+          const ZOOM_THRESHOLD = 14; // pixels of pinch required per zoom step
+          if (pinchAccum >= ZOOM_THRESHOLD) {
+            sendWS("mouse:zoom", { delta: 1.0 }); // Zoom in
+            showGestureHUD("🔍 Zoom In");
+            vibrate(10);
+            pinchAccum = 0;
+          } else if (pinchAccum <= -ZOOM_THRESHOLD) {
+            sendWS("mouse:zoom", { delta: -1.0 }); // Zoom out
+            showGestureHUD("🔍 Zoom Out");
+            vibrate(10);
+            pinchAccum = 0;
+          }
+        } else {
+          // 2-Finger Smooth Scroll
+          lastPinchDist = curDist;
+          const scrollDy = (curCenter.y - lastCenter.y) / 5.0;
+          const scrollDx = (curCenter.x - lastCenter.x) / 5.0;
+          if (Math.abs(scrollDy) > 0.15 || Math.abs(scrollDx) > 0.15) {
+            sendWS("mouse:scroll", { dy: scrollDy, dx: scrollDx });
+          }
+          lastCenter = curCenter;
         }
-        lastY = curY;
+
+      } else if (count === 3 && !swipeTriggered) {
+        // --- 3 Fingers: Multitasking Gestures ---
+        const center = getTouchesCenter(e.touches);
+        const deltaX = center.x - startCenter.x;
+        const deltaY = center.y - startCenter.y;
+        const travel = Math.hypot(deltaX, deltaY);
+        totalTravelDist += travel;
+
+        const SWIPE_THRESHOLD = 32; // Lower threshold (32px) for instant responsiveness
+        if (travel > SWIPE_THRESHOLD) {
+          swipeTriggered = true;
+          if (Math.abs(deltaY) > Math.abs(deltaX)) {
+            if (deltaY < -SWIPE_THRESHOLD) {
+              // 3 Fingers UP: Task View (Win + Tab)
+              sendWS("touchpad:gesture", { gesture: "task_view" });
+              showGestureHUD("🪟 Task View (Win+Tab)");
+              vibrate([15, 35]);
+            } else {
+              // 3 Fingers DOWN: Show Desktop (Win + D)
+              sendWS("touchpad:gesture", { gesture: "show_desktop" });
+              showGestureHUD("🖥️ Show Desktop (Win+D)");
+              vibrate([15, 35]);
+            }
+          } else {
+            if (deltaX > SWIPE_THRESHOLD) {
+              // 3 Fingers RIGHT: Switch App (Alt + Tab)
+              sendWS("touchpad:gesture", { gesture: "alt_tab" });
+              showGestureHUD("🔀 Switch App (Alt+Tab)");
+              vibrate(20);
+            } else {
+              // 3 Fingers LEFT: Prev App (Alt + Shift + Tab)
+              sendWS("touchpad:gesture", { gesture: "alt_shift_tab" });
+              showGestureHUD("🔀 Switch App (Alt+Shift+Tab)");
+              vibrate(20);
+            }
+          }
+        }
+
+      } else if (count === 4 && !swipeTriggered) {
+        // --- 4 Fingers: Virtual Desktops ---
+        const center = getTouchesCenter(e.touches);
+        const deltaX = center.x - startCenter.x;
+        const SWIPE_THRESHOLD = 32;
+        if (Math.abs(deltaX) > SWIPE_THRESHOLD) {
+          swipeTriggered = true;
+          totalTravelDist += Math.abs(deltaX);
+          if (deltaX > SWIPE_THRESHOLD) {
+            sendWS("touchpad:gesture", { gesture: "desktop_next" });
+            showGestureHUD("🗂️ Desktop ➔ (Ctrl+Win+Right)");
+            vibrate([20, 30]);
+          } else {
+            sendWS("touchpad:gesture", { gesture: "desktop_prev" });
+            showGestureHUD("🗂️ ⬅ Desktop (Ctrl+Win+Left)");
+            vibrate([20, 30]);
+          }
+        }
       }
     }, { passive: false });
 
     surface.addEventListener("touchend", (e) => {
-      const duration = Date.now() - touchStartTime;
       pointer.style.display = "none";
-      if (!hasMoved && duration < 250) {
-        if (e.changedTouches.length === 1) {
-          vibrate(10);
-          sendWS("mouse:click", { button: "left" });
+
+      if (e.touches.length === 0) {
+        const duration = Date.now() - touchStartTime;
+
+        // TAP GESTURE: finger(s) must have lifted within 350ms with minimal travel (<25px)
+        if (!swipeTriggered && duration < 350 && totalTravelDist < 25) {
+          if (maxFingers === 1) {
+            // 1-Finger Tap = Left Click
+            vibrate(12);
+            sendWS("mouse:click", { button: "left" });
+          } else if (maxFingers === 2) {
+            // 2-Finger Tap = Right Click (Native Windows Laptop Gesture!)
+            vibrate(30);
+            sendWS("mouse:click", { button: "right" });
+            showGestureHUD("🖱️ Right Click");
+          } else if (maxFingers === 3) {
+            // 3-Finger Tap = Windows Search (Win + S)
+            vibrate(30);
+            sendWS("touchpad:gesture", { gesture: "search" });
+            showGestureHUD("🔍 Windows Search (Win+S)");
+          } else if (maxFingers >= 4) {
+            // 4-Finger Tap = Action Center / Notifications (Win + A)
+            vibrate(30);
+            sendWS("touchpad:gesture", { gesture: "action_center" });
+            showGestureHUD("🔔 Notifications (Win+A)");
+          }
         }
+
+        // Reset
+        maxFingers = 0;
+        totalTravelDist = 0;
+        swipeTriggered = false;
+        pinchAccum = 0;
       }
     });
 
@@ -448,44 +699,214 @@
 
   function setupScreenViewer() {
     const btnToggle = document.getElementById("btn-toggle-stream");
+    const screenVideo = document.getElementById("screen-video");
     const screenImg = document.getElementById("screen-img");
     const placeholder = document.getElementById("screen-placeholder");
     const viewport = document.getElementById("screen-viewport");
     const touchRipple = document.getElementById("touch-ripple");
+    const streamBadge = document.getElementById("screen-stream-badge");
+    const codecBadge = document.getElementById("screen-stream-codec");
+
+    let peerConnection = null;
+    let isWebRTCActive = false;
+    let webrtcTimeoutTimer = null;
+    let jpegPullTimer = null;
+
+    function setBadge(fpsText, codecText, isRtc) {
+      if (streamBadge) streamBadge.textContent = fpsText;
+      if (codecBadge) {
+        codecBadge.textContent = codecText;
+        codecBadge.style.color = isRtc ? "#00F2FE" : "#FBBF24";
+        codecBadge.style.borderColor = isRtc ? "rgba(0,242,254,0.3)" : "rgba(251,191,36,0.3)";
+      }
+    }
+
+    async function startWebRTC() {
+      if (!window.RTCPeerConnection) {
+        console.warn("[WebRTC] RTCPeerConnection not supported in this browser, falling back to JPEG");
+        startJpegStream();
+        return;
+      }
+
+      try {
+        setBadge("🔄 Linking...", "WebRTC", true);
+        if (peerConnection) {
+          try { peerConnection.close(); } catch (e) {}
+          peerConnection = null;
+        }
+
+        peerConnection = new RTCPeerConnection({
+          iceServers: [],
+          bundlePolicy: "max-bundle",
+          rtcpMuxPolicy: "require"
+        });
+
+        peerConnection.addTransceiver("video", { direction: "recvonly" });
+
+        peerConnection.ontrack = (event) => {
+          if (webrtcTimeoutTimer) {
+            clearTimeout(webrtcTimeoutTimer);
+            webrtcTimeoutTimer = null;
+          }
+          isWebRTCActive = true;
+          screenVideo.srcObject = event.streams[0];
+          screenVideo.classList.remove("hidden");
+          screenImg.classList.add("hidden");
+          placeholder.classList.add("hidden");
+          btnToggle.textContent = "⏹ Stop";
+          btnToggle.style.background = "#f43f5e";
+          setBadge("⚡ 60 FPS", "H.264 WebRTC", true);
+          showToast("⚡ 60 FPS WebRTC Stream Connected!", "success");
+        };
+
+        peerConnection.oniceconnectionstatechange = () => {
+          if (peerConnection && (peerConnection.iceConnectionState === "failed" || peerConnection.iceConnectionState === "disconnected")) {
+            console.warn("[WebRTC] Connection failed, switching to Turbo JPEG mode");
+            fallbackToJpeg();
+          }
+        };
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        // Allow ICE candidate gathering to populate local host candidates
+        if (peerConnection.iceGatheringState !== "complete") {
+          await new Promise((resolve) => {
+            function checkIce() {
+              if (peerConnection && peerConnection.iceGatheringState === "complete") {
+                peerConnection.removeEventListener("icegatheringstatechange", checkIce);
+                resolve();
+              }
+            }
+            peerConnection.addEventListener("icegatheringstatechange", checkIce);
+            setTimeout(resolve, 800);
+          });
+        }
+
+        sendWS("webrtc:offer", {
+          sdp: peerConnection.localDescription.sdp,
+          type: peerConnection.localDescription.type,
+          fps: 60,
+          maxWidth: 1280
+        });
+
+        // 4 second timeout fallback to JPEG if WebRTC takes too long
+        webrtcTimeoutTimer = setTimeout(() => {
+          if (!isWebRTCActive && isScreenStreaming) {
+            console.warn("[WebRTC] Handshake timed out, switching to Turbo JPEG mode");
+            fallbackToJpeg();
+          }
+        }, 4000);
+
+      } catch (err) {
+        console.error("[WebRTC Setup Error]:", err);
+        fallbackToJpeg();
+      }
+    }
+
+    window.handleWebRTCAnswer = async (data) => {
+      if (peerConnection && data && data.sdp) {
+        try {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription({
+            sdp: data.sdp,
+            type: data.type || "answer"
+          }));
+        } catch (err) {
+          console.error("[WebRTC setRemoteDescription Error]:", err);
+          fallbackToJpeg();
+        }
+      }
+    };
+
+    window.handleWebRTCError = (data) => {
+      console.warn("[WebRTC Error from server]:", data);
+      fallbackToJpeg();
+    };
+
+    function fallbackToJpeg() {
+      if (peerConnection) {
+        try { peerConnection.close(); } catch (e) {}
+        peerConnection = null;
+      }
+      isWebRTCActive = false;
+      if (isScreenStreaming) {
+        startJpegStream();
+      }
+    }
+
+    function startJpegStream() {
+      isWebRTCActive = false;
+      screenVideo.classList.add("hidden");
+      screenImg.classList.remove("hidden");
+      placeholder.classList.add("hidden");
+      btnToggle.textContent = "⏹ Stop";
+      btnToggle.style.background = "#f43f5e";
+      setBadge("⚡ 30 FPS", "Turbo JPEG", false);
+      pullScreenFrame();
+    }
+
+    function pullScreenFrame() {
+      if (isScreenStreaming && !isWebRTCActive && activeTab === "screen") {
+        sendWS("screen:frame", { quality: 55, maxWidth: 1080, monitor_id: selectedMonitorId });
+      }
+    }
+
+    window.renderScreenFrame = (frameB64) => {
+      if (isWebRTCActive) return;
+      screenImg.src = frameB64;
+      if (isScreenStreaming && !isWebRTCActive && activeTab === "screen") {
+        if (jpegPullTimer) clearTimeout(jpegPullTimer);
+        // Turbo 15ms frame pacing (~30-35 FPS responsive)
+        jpegPullTimer = setTimeout(pullScreenFrame, 15);
+      }
+    };
+
+    function stopScreenStream() {
+      if (webrtcTimeoutTimer) {
+        clearTimeout(webrtcTimeoutTimer);
+        webrtcTimeoutTimer = null;
+      }
+      if (jpegPullTimer) {
+        clearTimeout(jpegPullTimer);
+        jpegPullTimer = null;
+      }
+      if (peerConnection) {
+        try { peerConnection.close(); } catch (e) {}
+        peerConnection = null;
+      }
+      isWebRTCActive = false;
+      sendWS("webrtc:stop");
+
+      if (screenVideo.srcObject) {
+        try {
+          screenVideo.srcObject.getTracks().forEach((t) => t.stop());
+        } catch (e) {}
+        screenVideo.srcObject = null;
+      }
+      screenVideo.classList.add("hidden");
+      screenImg.classList.add("hidden");
+      placeholder.classList.remove("hidden");
+      btnToggle.textContent = "▶ Start Stream";
+      btnToggle.style.background = "";
+      setBadge("⚡ 60 FPS", "WebRTC", true);
+    }
 
     btnToggle?.addEventListener("click", () => {
       vibrate(15);
       isScreenStreaming = !isScreenStreaming;
       if (isScreenStreaming) {
-        btnToggle.textContent = "⏹ Stop";
-        btnToggle.style.background = "#f43f5e";
-        screenImg.classList.remove("hidden");
-        placeholder.classList.add("hidden");
-        pullScreenFrame();
+        startWebRTC();
       } else {
-        btnToggle.textContent = "▶ Start Stream";
-        btnToggle.style.background = "";
-        screenImg.classList.add("hidden");
-        placeholder.classList.remove("hidden");
+        stopScreenStream();
       }
     });
 
-    function pullScreenFrame() {
-      if (isScreenStreaming && activeTab === "screen") {
-        sendWS("screen:frame", { quality: 60, maxWidth: 1280, monitor_id: selectedMonitorId });
-      }
-    }
+    // Touch-to-click mapping on live screen (Works on both WebRTC Video and JPEG Img!)
+    function handleScreenClick(e) {
+      const activeEl = (!screenVideo.classList.contains("hidden")) ? screenVideo : screenImg;
+      const rect = activeEl.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) return;
 
-    window.renderScreenFrame = (frameB64) => {
-      screenImg.src = frameB64;
-      if (isScreenStreaming && activeTab === "screen") {
-        setTimeout(pullScreenFrame, 60);
-      }
-    };
-
-    // Touch-to-click mapping on selected monitor with visual touch ripple effect
-    screenImg.addEventListener("click", (e) => {
-      const rect = screenImg.getBoundingClientRect();
       const clickX = e.clientX - rect.left;
       const clickY = e.clientY - rect.top;
       const relX = clickX / rect.width;
@@ -509,7 +930,10 @@
           button: "left"
         });
       }
-    });
+    }
+
+    screenVideo.addEventListener("click", handleScreenClick);
+    screenImg.addEventListener("click", handleScreenClick);
 
     document.getElementById("btn-screen-fs")?.addEventListener("click", () => {
       vibrate(15);
@@ -574,6 +998,182 @@
         setTimeout(pullWebcamFrame, 70);
       }
     };
+  }
+
+  // --- 🪟 Taskbar Running Apps Live Monitor & Remote Controls ---
+  function fetchAppWindows() {
+    const grid = document.getElementById("app-windows-grid");
+    if (grid && (!cachedAppWindows || cachedAppWindows.length === 0)) {
+      grid.innerHTML = `<div class="loading-text"><span class="pulse-alarm-dot" style="display:inline-block; margin-right:6px;"></span> Scanning taskbar apps & capturing previews...</div>`;
+    }
+    sendWS("windows:thumbnails");
+  }
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function renderAppWindows(windows) {
+    cachedAppWindows = windows || [];
+    const grid = document.getElementById("app-windows-grid");
+    if (!grid) return;
+
+    if (!windows || windows.length === 0) {
+      grid.innerHTML = `
+        <div class="empty-state" style="padding: 24px 12px; text-align: center; color: var(--text-muted); grid-column: 1 / -1;">
+          <div style="font-size: 32px; margin-bottom: 8px;">🪟</div>
+          <p style="font-weight: 700; color: #fff;">No active taskbar apps found</p>
+          <p style="font-size: 12px; margin-top: 4px;">Open an application (Chrome, VS Code, Explorer) on your PC and tap Refresh.</p>
+        </div>`;
+      return;
+    }
+
+    grid.innerHTML = windows.map((win) => {
+      const safeTitle = escapeHtml(win.title || "Window");
+      const safeProc = escapeHtml(win.process_name || win.process || "");
+      const icon = win.icon || "🪟";
+      const thumbSrc = win.thumbnail || "";
+      const isMinimized = !!win.is_minimized;
+
+      return `
+        <div class="app-window-card" id="app-card-${win.hwnd}">
+          <div class="app-window-card-header">
+            <div class="app-window-info">
+              <span class="app-window-icon">${icon}</span>
+              <div style="min-width: 0;">
+                <div class="app-window-title" title="${safeTitle}">${safeTitle}</div>
+                <div class="app-window-proc">
+                  ${safeProc}
+                  ${isMinimized ? '<span style="color: var(--cyan); font-weight:700; margin-left:4px;">(💤 Minimized)</span>' : '<span style="color: var(--green); margin-left:4px;">(Active)</span>'}
+                </div>
+              </div>
+            </div>
+            <button class="btn-win-act btn-win-act-primary" style="flex: initial; padding: 4px 8px; font-size: 10px;" onclick="window.startWindowStream(${win.hwnd})">
+              ▶ Stream
+            </button>
+          </div>
+
+          <div class="app-window-thumb-wrap" onclick="window.startWindowStream(${win.hwnd})" title="Tap to Stream Live">
+            ${thumbSrc ? `<img src="${thumbSrc}" class="app-window-thumb-img" alt="${safeTitle}">` : `<div style="font-size: 36px; opacity: 0.35;">${icon}</div>`}
+            <div class="app-window-overlay-play">▶</div>
+          </div>
+
+          <div class="app-window-card-actions">
+            <button class="btn-win-act" onclick="window.actionWindow(${win.hwnd}, 'focus')" title="Bring window to front">
+              ⚡ Focus
+            </button>
+            <button class="btn-win-act" onclick="window.actionWindow(${win.hwnd}, 'minimize')" title="Minimize">
+              🗕 Min
+            </button>
+            <button class="btn-win-act" onclick="window.actionWindow(${win.hwnd}, 'maximize')" title="Maximize">
+              🗖 Max
+            </button>
+            <button class="btn-win-act btn-win-act-danger" onclick="window.actionWindow(${win.hwnd}, 'close')" title="Close Window">
+              ❌ Close
+            </button>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  window.startWindowStream = function (hwnd) {
+    vibrate(15);
+    const win = cachedAppWindows.find((w) => w.hwnd == hwnd) || {};
+    const title = win.title || "App Window";
+    const icon = win.icon || "🪟";
+    const proc = win.process_name || win.process || "";
+
+    // If window is minimized, bring it to front so PrintWindow has live desktop pixels
+    if (win.is_minimized) {
+      window.actionWindow(hwnd, "focus");
+      win.is_minimized = false;
+    }
+
+    isWindowStreaming = true;
+    activeWindowHwnd = hwnd;
+
+    const streamContainer = document.getElementById("app-stream-container");
+    const activeIcon = document.getElementById("active-app-icon");
+    const activeTitle = document.getElementById("active-app-title");
+    const activeSub = document.getElementById("active-app-sub");
+
+    if (streamContainer) {
+      streamContainer.classList.remove("hidden");
+      streamContainer.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (activeIcon) activeIcon.textContent = icon;
+    if (activeTitle) activeTitle.textContent = title;
+    if (activeSub) activeSub.textContent = proc;
+
+    showToast(`Streaming: ${title}`, "info");
+    pullWindowStreamFrame();
+  };
+
+  window.stopWindowStream = function () {
+    vibrate(10);
+    isWindowStreaming = false;
+    activeWindowHwnd = null;
+
+    const streamContainer = document.getElementById("app-stream-container");
+    const streamImg = document.getElementById("app-stream-img");
+    if (streamContainer) streamContainer.classList.add("hidden");
+    if (streamImg) streamImg.src = "";
+  };
+
+  window.actionWindow = function (hwnd, action) {
+    vibrate(15);
+    if (action === "close") {
+      const win = cachedAppWindows.find((w) => w.hwnd == hwnd);
+      const title = win?.title ? `"${win.title}"` : "this window";
+      if (!confirm(`Are you sure you want to close ${title}?`)) {
+        return;
+      }
+    }
+    sendWS("windows:action", { hwnd: hwnd, action: action });
+  };
+
+  function pullWindowStreamFrame() {
+    if (isWindowStreaming && activeWindowHwnd && activeTab === "screen") {
+      sendWS("windows:frame", { hwnd: activeWindowHwnd, quality: 65, maxWidth: 960 });
+    }
+  }
+
+  function renderWindowStreamFrame(data) {
+    if (!isWindowStreaming || !activeWindowHwnd || data.hwnd != activeWindowHwnd) return;
+    const img = document.getElementById("app-stream-img");
+    if (img && data.frame) {
+      img.src = data.frame;
+    }
+    if (isWindowStreaming && activeTab === "screen") {
+      setTimeout(pullWindowStreamFrame, 80);
+    }
+  }
+
+  function setupAppWindowsMonitor() {
+    const btnRefresh = document.getElementById("btn-refresh-windows");
+    btnRefresh?.addEventListener("click", () => {
+      vibrate(10);
+      fetchAppWindows();
+    });
+
+    const btnStopStream = document.getElementById("btn-stop-app-stream");
+    btnStopStream?.addEventListener("click", () => {
+      window.stopWindowStream();
+    });
+
+    const btnFocusActive = document.getElementById("btn-focus-active-app");
+    btnFocusActive?.addEventListener("click", () => {
+      if (activeWindowHwnd) {
+        window.actionWindow(activeWindowHwnd, "focus");
+      }
+    });
   }
 
   function setupMediaControls() {
@@ -1063,40 +1663,305 @@
     if (badge) badge.textContent = `${level}%`;
   }
 
-  // --- 3. Smart Security (Walk-Away Lock & CCTV Intruder Alert) ---
+  // --- 3. Smart Security & Anti-Theft Sentry Engine ---
+  let sentryCountdownInterval = null;
+  let isSentryArmed = false;
+  let isSentryRinging = false;
+  let phoneAudioContext = null;
+  let phoneOscillator = null;
+  let phoneSirenTimer = null;
+  let isPhoneSirenActive = false;
+
+  function startPhoneSirenTone() {
+    if (isPhoneSirenActive) return;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!phoneAudioContext || phoneAudioContext.state === "closed") {
+        phoneAudioContext = new AudioCtx();
+      }
+      if (phoneAudioContext.state === "suspended") {
+        phoneAudioContext.resume().catch(() => {});
+      }
+      const osc = phoneAudioContext.createOscillator();
+      const gain = phoneAudioContext.createGain();
+
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(800, phoneAudioContext.currentTime);
+      gain.gain.setValueAtTime(0.35, phoneAudioContext.currentTime);
+
+      let up = true;
+      let f = 800;
+      if (phoneSirenTimer) clearInterval(phoneSirenTimer);
+      phoneSirenTimer = setInterval(() => {
+        if (!isPhoneSirenActive || !phoneAudioContext || phoneAudioContext.state === "closed") {
+          clearInterval(phoneSirenTimer);
+          phoneSirenTimer = null;
+          return;
+        }
+        f = up ? f + 70 : f - 70;
+        if (f >= 1600) up = false;
+        if (f <= 750) up = true;
+        try {
+          osc.frequency.setValueAtTime(f, phoneAudioContext.currentTime);
+        } catch (e) {}
+      }, 40);
+
+      osc.connect(gain);
+      gain.connect(phoneAudioContext.destination);
+      osc.start();
+      phoneOscillator = osc;
+      isPhoneSirenActive = true;
+    } catch (e) {
+      console.log("Audio siren err:", e);
+    }
+  }
+
+  function stopPhoneSirenTone() {
+    isPhoneSirenActive = false;
+    if (phoneSirenTimer) {
+      clearInterval(phoneSirenTimer);
+      phoneSirenTimer = null;
+    }
+    if (phoneOscillator) {
+      try { phoneOscillator.stop(); phoneOscillator.disconnect(); } catch (e) {}
+      phoneOscillator = null;
+    }
+    if (phoneAudioContext) {
+      try { phoneAudioContext.close(); } catch (e) {}
+      phoneAudioContext = null;
+    }
+  }
+
   function setupSecurityControls() {
-    // Walk-Away Auto-Lock
+    // 1. Hero Anti-Theft Sentry Arm/Disarm Toggle
+    const btnSentry = document.getElementById("btn-toggle-sentry");
+    btnSentry?.addEventListener("click", () => {
+      vibrate(30);
+      if (isSentryArmed || isSentryRinging || sentryCountdownInterval !== null) {
+        // Disarm or Cancel Countdown
+        if (sentryCountdownInterval !== null) {
+          clearInterval(sentryCountdownInterval);
+          sentryCountdownInterval = null;
+        }
+        sendWS("sentry:disarm");
+        updateSentryUI({ active: false, ringing: false });
+        showToast("🟢 Disarming Sentry...", "info");
+      } else {
+        // Arm with 10s countdown
+        sendWS("sentry:arm", { grace_seconds: 10 });
+        startSentryArmingCountdown(10);
+      }
+    });
+
+    // 2. Disarm button inside modal
+    document.getElementById("btn-modal-disarm-sentry")?.addEventListener("click", () => {
+      vibrate(40);
+      sendWS("sentry:disarm");
+      stopPhoneSirenTone();
+      document.getElementById("modal-intruder-alert")?.classList.add("hidden");
+      showToast("🟢 Sentry Disarmed & Siren Stopped!", "success");
+    });
+
+    // 3. Emergency Actions in Security Tab
+    document.getElementById("btn-sec-panic")?.addEventListener("click", () => {
+      vibrate([50, 50, 100]);
+      sendWS("system:panic");
+      showToast("🚨 Boss Key: Desktop shown & audio muted!", "error");
+    });
+
+    document.getElementById("btn-sec-lock")?.addEventListener("click", () => {
+      vibrate(30);
+      sendWS("system:action", { action: "lock" });
+      showToast("🔒 Workstation Locked", "info");
+    });
+
+    document.getElementById("btn-sec-find-pc")?.addEventListener("click", () => {
+      vibrate(25);
+      if (isFindPcRinging) {
+        sendWS("find_pc:stop");
+      } else {
+        sendWS("find_pc:start");
+      }
+    });
+
+    document.getElementById("btn-sec-sleep")?.addEventListener("click", () => {
+      if (confirm("Put PC into Sleep mode?")) {
+        vibrate(30);
+        sendWS("system:action", { action: "sleep" });
+      }
+    });
+
+    // 4. Refresh Audit Logs
+    document.getElementById("btn-refresh-sec-logs")?.addEventListener("click", () => {
+      vibrate(15);
+      sendWS("security:logs");
+    });
+
+    // 5. Walk-Away Auto-Lock
     const toggleWalk = document.getElementById("toggle-walkaway-lock");
     toggleWalk?.addEventListener("change", () => {
       vibrate(20);
       sendWS("settings:walkaway_lock", { enabled: toggleWalk.checked });
+      showToast(`Walk-Away Auto-Lock ${toggleWalk.checked ? "Enabled" : "Disabled"}`, "info");
     });
 
-    // CCTV Intruder Guard
+    // 6. CCTV Intruder Guard
     const toggleGuard = document.getElementById("toggle-cctv-guard");
     toggleGuard?.addEventListener("change", () => {
       vibrate(25);
       sendWS("guard:toggle", { enabled: toggleGuard.checked });
+      showToast(`CCTV Stealth Guard ${toggleGuard.checked ? "Activated" : "Deactivated"}`, "info");
     });
 
-    // Intruder Alert Modal Actions
+    // 7. Intruder Modal extra buttons
     document.getElementById("btn-intruder-lock")?.addEventListener("click", () => {
       vibrate(40);
       sendWS("system:action", { action: "lock" });
-      document.getElementById("modal-intruder-alert")?.classList.add("hidden");
       showToast("🔒 PC Workstation Locked", "info");
     });
 
-    document.getElementById("btn-intruder-alarm")?.addEventListener("click", () => {
-      vibrate(30);
-      sendWS("find_pc:start");
-      document.getElementById("modal-intruder-alert")?.classList.add("hidden");
-      showToast("🔊 PC Alarm Ringing!", "error");
-    });
-
     document.getElementById("btn-intruder-dismiss")?.addEventListener("click", () => {
+      vibrate(30);
+      sendWS("sentry:disarm");
+      stopPhoneSirenTone();
       document.getElementById("modal-intruder-alert")?.classList.add("hidden");
+      showToast("🟢 Sentry Disarmed & Alarm Dismissed", "info");
     });
+  }
+
+  function startSentryArmingCountdown(seconds) {
+    const card = document.getElementById("sentry-card");
+    const badge = document.getElementById("sentry-status-badge");
+    const cd = document.getElementById("sentry-countdown");
+    const btn = document.getElementById("btn-toggle-sentry");
+    const btnTxt = document.getElementById("btn-sentry-text");
+    const desc = document.getElementById("sentry-desc-text");
+
+    if (card) {
+      card.className = "app-card sentry-hero-card arming";
+    }
+    if (badge) {
+      badge.className = "sentry-badge badge-arming";
+      badge.textContent = "ARMING...";
+    }
+    if (cd) {
+      cd.classList.remove("hidden");
+      cd.textContent = `${seconds}s`;
+    }
+    if (btn) {
+      btn.className = "btn-sentry-main btn-sentry-disarm";
+    }
+    if (btnTxt) {
+      btnTxt.textContent = "CANCEL ARMING";
+    }
+    if (desc) {
+      desc.textContent = `Arming in progress (${seconds}s). Step away from your laptop now.`;
+    }
+
+    if (sentryCountdownInterval) clearInterval(sentryCountdownInterval);
+    let left = seconds;
+    sentryCountdownInterval = setInterval(() => {
+      left--;
+      if (left > 0) {
+        if (cd) cd.textContent = `${left}s`;
+        if (desc) desc.textContent = `Arming in ${left}s... Step away from your laptop table.`;
+      } else {
+        clearInterval(sentryCountdownInterval);
+        sentryCountdownInterval = null;
+        if (cd) cd.classList.add("hidden");
+        if (!isSentryRinging) {
+          updateSentryUI({ active: true, ringing: false, is_grace: false });
+        }
+      }
+    }, 1000);
+  }
+
+  function updateSentryUI(data) {
+    isSentryArmed = !!data.active;
+    isSentryRinging = !!data.ringing;
+
+    const card = document.getElementById("sentry-card");
+    const badge = document.getElementById("sentry-status-badge");
+    const cd = document.getElementById("sentry-countdown");
+    const btn = document.getElementById("btn-toggle-sentry");
+    const btnTxt = document.getElementById("btn-sentry-text");
+    const desc = document.getElementById("sentry-desc-text");
+    const powerVal = document.getElementById("tripwire-power-val");
+
+    if (powerVal && data.initial_plugged !== undefined) {
+      powerVal.textContent = data.initial_plugged ? "AC Connected (Tripwire Set)" : "Battery Mode";
+    }
+
+    if (!data.active) {
+      // Disarmed State
+      if (sentryCountdownInterval) {
+        clearInterval(sentryCountdownInterval);
+        sentryCountdownInterval = null;
+      }
+      stopPhoneSirenTone();
+      document.getElementById("modal-intruder-alert")?.classList.add("hidden");
+      if (card) card.className = "app-card sentry-hero-card";
+      if (badge) {
+        badge.className = "sentry-badge";
+        badge.textContent = "DISARMED";
+      }
+      if (cd) cd.classList.add("hidden");
+      if (btn) btn.className = "btn-sentry-main btn-sentry-arm";
+      if (btnTxt) btnTxt.textContent = "ARM SENTRY (10s)";
+      if (desc) desc.textContent = "Cafe & Library Vault. Sounds 100% siren & alerts phone if laptop is moved or charger is unplugged.";
+    } else if (data.ringing) {
+      // Alarm Triggered State
+      if (card) card.className = "app-card sentry-hero-card triggered";
+      if (badge) {
+        badge.className = "sentry-badge badge-alert";
+        badge.textContent = "🚨 ALARM TRIGGERED!";
+      }
+      if (cd) cd.classList.add("hidden");
+      if (btn) btn.className = "btn-sentry-main btn-sentry-disarm";
+      if (btnTxt) btnTxt.textContent = "🟢 STOP SIREN & DISARM";
+      if (desc) desc.textContent = "🚨 THEFT TRIPWIRE BREACHED! Laptop is sounding 100% police siren!";
+    } else if (data.is_grace) {
+      // Arming Countdown State
+      if (!sentryCountdownInterval) {
+        startSentryArmingCountdown(data.grace_remaining || 10);
+      }
+    } else {
+      // Fully Armed State
+      if (sentryCountdownInterval) {
+        clearInterval(sentryCountdownInterval);
+        sentryCountdownInterval = null;
+      }
+      if (card) card.className = "app-card sentry-hero-card armed";
+      if (badge) {
+        badge.className = "sentry-badge badge-armed";
+        badge.textContent = "🟢 ARMED & SECURED";
+      }
+      if (cd) cd.classList.add("hidden");
+      if (btn) btn.className = "btn-sentry-main btn-sentry-disarm";
+      if (btnTxt) btnTxt.textContent = "🟢 DISARM SENTRY";
+      if (desc) desc.textContent = "🛡️ Laptop sensors are actively guarded. Charger unplug or mouse motion will trigger 100% siren!";
+    }
+  }
+
+  function handleSentryTriggered(data) {
+    vibrate([400, 200, 400, 200, 800]);
+    startPhoneSirenTone();
+
+    const modal = document.getElementById("modal-intruder-alert");
+    const title = document.getElementById("intruder-modal-title");
+    const sub = document.getElementById("intruder-modal-sub");
+    const img = document.getElementById("intruder-modal-img");
+    const timeEl = document.getElementById("intruder-time-text");
+
+    if (title) title.textContent = "🚨 SENTRY TRIPWIRE BREACHED!";
+    if (sub) sub.textContent = data.reason || "Laptop was physically touched or charger was unplugged!";
+    if (img && data.photo) img.src = data.photo;
+    if (timeEl) timeEl.textContent = `Time: ${data.time || "Just now"} • ${data.reason || ""}`;
+    if (modal) modal.classList.remove("hidden");
+
+    updateSentryUI({ active: true, ringing: true });
+    updateIntruderPreview(data);
   }
 
   function handleIntruderAlert(data) {
@@ -1123,7 +1988,57 @@
     }
   }
 
-  // --- 4. Live Hardware Monitor HUD Loop (2-sec auto refresh) ---
+  function renderSecurityLogs(logs) {
+    const container = document.getElementById("sec-logs-container");
+    if (!container) return;
+    if (!logs || logs.length === 0) {
+      container.innerHTML = `<div class="loading-text" style="color: var(--text-dim);">No security events recorded yet.</div>`;
+      return;
+    }
+    container.innerHTML = logs.slice(0, 15).map(log => `
+      <div class="sec-log-row">
+        <div>
+          <span class="sec-log-action">${log.event || log.action || "EVENT"}</span>
+          <p style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${log.detail || log.message || ""}</p>
+        </div>
+        <span class="sec-log-time">${log.time || log.timestamp || ""}</span>
+      </div>
+    `).join("");
+  }
+
+  // --- 4. Auto-Updater Controller & Notification ---
+  function setupAutoUpdater() {
+    const banner = document.getElementById("update-alert-banner");
+    const bannerText = document.getElementById("update-banner-text");
+    const btnApply = document.getElementById("btn-apply-update");
+    const btnDismiss = document.getElementById("btn-dismiss-update");
+
+    btnDismiss?.addEventListener("click", () => {
+      vibrate(10);
+      banner?.classList.add("hidden");
+    });
+
+    btnApply?.addEventListener("click", () => {
+      vibrate(25);
+      if (confirm("PC par latest update download karke restart karein?")) {
+        btnApply.disabled = true;
+        btnApply.textContent = "Updating...";
+        sendWS("update:apply");
+        showToast("Downloading update on PC. PC will restart automatically...", "info");
+      }
+    });
+
+    window.renderUpdateBanner = (info) => {
+      if (info && info.has_update) {
+        if (bannerText) {
+          bannerText.textContent = `🚀 New Update Available (${info.latest_version})!`;
+        }
+        banner?.classList.remove("hidden");
+      }
+    };
+  }
+
+  // --- 5. Live Hardware Monitor HUD Loop (2-sec auto refresh) ---
   let hudInterval = null;
   function setupLiveHUDLoop() {
     if (hudInterval) clearInterval(hudInterval);

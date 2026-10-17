@@ -1,5 +1,5 @@
 """
-Pulse Remote - Keyboard & System Shortcut Control
+EasyConnect - Keyboard & System Shortcut Control
 """
 import time
 import sys
@@ -32,6 +32,7 @@ KEY_MAP = {
     "pageup": "pageup",
     "pagedown": "pagedown",
     "capslock": "capslock",
+    "win": "win",
 }
 
 class KeyboardController:
@@ -90,12 +91,11 @@ class KeyboardController:
 
         # Handle Win key shortcuts specifically for Windows
         if sys.platform == "win32" and "win" in sc:
-            parts = sc.split("+")
-            other_key = [p for p in parts if p != "win"]
-            if other_key:
-                pyautogui.hotkey("win", other_key[0])
-            else:
+            parts = [p.strip() for p in sc.split("+")]
+            if len(parts) == 1 and parts[0] == "win":
                 pyautogui.press("win")
+            else:
+                pyautogui.hotkey(*parts)
             return
 
         # General combination hotkeys

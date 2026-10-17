@@ -1,5 +1,5 @@
 """
-Pulse Remote v2.0 - Main Python PC Agent (Local Wi-Fi Hub)
+EasyConnect v2.0 - Main Python PC Agent (Local Wi-Fi Hub)
 """
 import os
 import sys
@@ -37,10 +37,11 @@ from qr_pairing import qr_manager, get_local_ip
 from screen_capture import screen
 from system_control import system
 from network import NetworkServer
+from auto_updater import auto_updater
 
 
 class PulseAgentCLI:
-    """High-Performance, Standalone Terminal CLI Hub for Pulse Remote v2.0."""
+    """High-Performance, Standalone Terminal CLI Hub for EasyConnect v2.0."""
 
     def __init__(self, qr_style: str = "compact"):
         self.qr_style = qr_style
@@ -118,10 +119,11 @@ class PulseAgentCLI:
         )
 
         print("\n" + "=" * 68, flush=True)
-        print("          ⚡ PULSE REMOTE v2.0 - LOCAL WI-FI PC AGENT", flush=True)
+        print("          ⚡ EASYCONNECT v2.1 - LOCAL WI-FI PC AGENT", flush=True)
         print("=" * 68, flush=True)
         print(f"  🖥️  PC Name:       {config.DEVICE_NAME} ({config.DEVICE_OS})", flush=True)
         print(f"  🌐 Server URL:    \033[96m{server_url}\033[0m", flush=True)
+        print(f"  📥 Download Page: \033[95m{server_url}/download\033[0m", flush=True)
         print(f"  🔑 Pairing PIN:   \033[93m\033[1m{formatted_pin}\033[0m  (For manual entry)", flush=True)
         print(f"  ⏱️  Token Expiry:  {mins:02d}:{secs:02d}", flush=True)
         print(f"  📡 Monitors:      {len(monitors)} active display(s)", flush=True)
@@ -135,9 +137,11 @@ class PulseAgentCLI:
         print("", flush=True)
         print(f"  🔗 Direct Pairing Link: \033[94m{direct_url}\033[0m", flush=True)
         print(f"  💡 Or open browser and enter PIN: \033[93m{formatted_pin}\033[0m", flush=True)
+        up_info = auto_updater.get_update_info()
+        if up_info.get("has_update"):
+            print(f"  \033[93m✨ [UPDATE AVAILABLE] Version {up_info.get('latest_version')} is ready! Press [U] to update now.\033[0m", flush=True)
         print("=" * 68, flush=True)
-        print("  HOTKEYS:  [R] New QR / PIN    [T] Toggle QR Size    [D] Disconnect All", flush=True)
-        print("            [O] Open in Browser [S] Stop Alarm        [Q] Quit Agent", flush=True)
+        print("  HOTKEYS:  [R] New QR/PIN   [U] Update   [O] Open Web   [S] Alarm   [Q] Quit", flush=True)
         print("=" * 68, flush=True)
 
     def run(self):
@@ -200,28 +204,53 @@ class PulseAgentCLI:
                         elif char == 'o':
                             print("\n[Action] Opening controller in PC browser...", flush=True)
                             webbrowser.open(qr_manager.get_server_url())
+                        elif char == 'u':
+                            print("\n[Update] Checking & applying latest update...", flush=True)
+                            res = auto_updater.apply_update()
+                            print(f"[Update] {res.get('message')}", flush=True)
                         elif char == 's':
+                            stopped_any = False
                             if system.is_find_pc_active():
                                 system.stop_find_pc()
                                 print("\n[Action] Stopped Find My PC alarm.", flush=True)
+                                stopped_any = True
+                            if getattr(system, 'sentry_ringing', False) or getattr(system, 'sentry_armed', False):
+                                system.disarm_sentry("Terminal [S]")
+                                print("\n[Action] Disarmed Sentry alarm.", flush=True)
+                                stopped_any = True
+                            if not stopped_any:
+                                print("\n[Action] No active alarm to stop.", flush=True)
                         elif char == 'q':
-                            print("\n[Pulse] Exiting PC Agent. Goodbye!", flush=True)
+                            print("\n[EasyConnect] Exiting PC Agent. Goodbye!", flush=True)
                             self.running = False
                             break
         except KeyboardInterrupt:
-            print("\n[Pulse] Stopping PC Agent (Ctrl+C)...", flush=True)
+            print("\n[EasyConnect] Stopping PC Agent (Ctrl+C)...", flush=True)
             self.running = False
 
 
 class PulseAgentGUI:
-    """Modern Dark GUI for Pulse Remote v2.0 with Local Wi-Fi Connection."""
+    """Modern Dark GUI for EasyConnect v2.0 with Local Wi-Fi Connection."""
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Pulse Remote - PC Agent")
+        self.root.title("EasyConnect - PC Agent")
         self.root.geometry("440x630")
         self.root.configure(bg="#080c16")
         self.root.resizable(False, False)
+
+        # Set Window Icon
+        try:
+            icon_candidates = [
+                Path(__file__).resolve().parent / "icon.ico",
+                Path(getattr(sys, "_MEIPASS", "")) / "icon.ico",
+            ]
+            for ic in icon_candidates:
+                if ic.exists():
+                    self.root.iconbitmap(default=str(ic))
+                    break
+        except Exception:
+            pass
 
         # Center window on screen
         self.center_window(440, 630)
@@ -249,7 +278,7 @@ class PulseAgentGUI:
         # Print Terminal QR Code
         monitors = screen.get_monitors_list()
         print("=" * 60, flush=True)
-        print("  PULSE REMOTE v2.0 - LOCAL WI-FI PC AGENT ACTIVE", flush=True)
+        print("  EASYCONNECT v2.1 - LOCAL WI-FI PC AGENT ACTIVE", flush=True)
         print("=" * 60, flush=True)
         print(f"> Local Wi-Fi URL:  {qr_manager.get_server_url()}", flush=True)
         print(f"> Device Name:      {config.DEVICE_NAME} ({config.DEVICE_OS})", flush=True)
@@ -276,7 +305,7 @@ class PulseAgentGUI:
 
         title_badge = tk.Label(
             header_frame,
-            text="⚡ PULSE REMOTE",
+            text="⚡ EASYCONNECT",
             font=("Plus Jakarta Sans", 11, "bold"),
             fg="#38bdf8",
             bg="#0f1a2e",
@@ -317,7 +346,7 @@ class PulseAgentGUI:
             padx=8,
             pady=2,
             cursor="hand2",
-            command=lambda: system.stop_find_pc(),
+            command=lambda: (system.stop_find_pc(), system.disarm_sentry("GUI Button")),
         )
         btn_stop_find.pack(side="right", padx=6)
 
@@ -471,7 +500,7 @@ class PulseAgentGUI:
         auth_manager.revoke_all_sessions()
         self.on_device_disconnected()
         if messagebox:
-            messagebox.showinfo("Pulse Remote", "All paired devices have been disconnected.")
+            messagebox.showinfo("EasyConnect", "All paired devices have been disconnected.")
 
     def on_device_connected(self, device_info):
         """Callback when a phone connects."""
@@ -509,9 +538,15 @@ class PulseAgentGUI:
         if remaining <= 0 and not self.is_connected:
             self.regenerate_qr()
 
-        # Update Find My PC Banner visibility
-        if system.is_find_pc_active():
+        # Update Find My PC / Sentry Alarm Banner visibility
+        is_sentry = getattr(system, 'sentry_ringing', False)
+        is_find = system.is_find_pc_active()
+        if is_find or is_sentry:
             if not self.find_pc_banner.winfo_ismapped():
+                if is_sentry:
+                    self.find_pc_label.config(text="🚨 SENTRY THEFT ALARM RINGING! 🚨")
+                else:
+                    self.find_pc_label.config(text="🚨 FIND MY PC SOUND RINGING! 🚨")
                 self.find_pc_banner.pack(fill="x", padx=24, pady=4, before=self.qr_container)
         else:
             if self.find_pc_banner.winfo_ismapped():
@@ -521,7 +556,7 @@ class PulseAgentGUI:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Pulse Remote PC Agent v2.0")
+    parser = argparse.ArgumentParser(description="EasyConnect PC Agent v2.1")
     parser.add_argument(
         "--gui", "-g",
         action="store_true",

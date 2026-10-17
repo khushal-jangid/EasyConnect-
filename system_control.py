@@ -1,5 +1,5 @@
 """
-Pulse Remote v2.0 - System Metrics, Allowlisted App Launcher & Find My PC Engine
+EasyConnect v2.0 - System Metrics, Allowlisted App Launcher & Find My PC Engine
 """
 import os
 import sys
@@ -31,6 +31,21 @@ class SystemController:
         self._guard_thread = None
         self._last_intruder_info = None
         self._on_intruder_callback = None
+
+        # Anti-Theft Sentry Mode State (Cafe & Library Security Hub)
+        self._sentry_active = False
+        self._sentry_ringing = False
+        self._sentry_armed_at = 0
+        self._sentry_grace_seconds = 10
+        self._sentry_thread = None
+        self._sentry_siren_thread = None
+        self._sentry_callback = None
+        self._sentry_initial_plugged = True
+        self._sentry_flash_window = None
+        self._sentry_flash_proc = None
+        self._sentry_stop_event = threading.Event()
+        self._sentry_status_listener = None
+        self._last_sentry_alert = None
 
         # Walk-Away Auto-Lock State
         self._walkaway_lock_enabled = False
@@ -279,10 +294,10 @@ class SystemController:
                     now = time.time()
 
                     # Trigger alert on significant physical mouse movement
-                    if (dx > 25 or dy > 25) and (now - last_alert_time > 8):
+                    if (dx > 18 or dy > 18) and (now - last_alert_time > 6):
                         last_alert_time = now
                         last_pos = cur_pos
-                        photo_b64 = webcam.capture_frame_base64(quality=70)
+                        photo_b64 = webcam.capture_snapshot_base64(quality=70)
                         timestr = time.strftime("%Y-%m-%d %H:%M:%S")
                         self._last_intruder_info = {
                             "time": timestr,
@@ -304,6 +319,11 @@ class SystemController:
     def stop_guard_mode(self, client_name: str = "Device") -> dict:
         """Deactivate CCTV Stealth PC Guard mode."""
         self._guard_mode_active = False
+        try:
+            from webcam_capture import webcam
+            webcam.release()
+        except Exception:
+            pass
         audit_log.log("GUARD_MODE_OFF", "CCTV Stealth PC Guard deactivated", client_name)
         return {"success": True, "active": False, "message": "🛡️ CCTV PC Guard deactivated"}
 
@@ -322,6 +342,264 @@ class SystemController:
 
     def is_walkaway_lock_enabled(self) -> bool:
         return self._walkaway_lock_enabled
+
+    # --- 🚨 Cafe & Library Anti-Theft Sentry Engine ---
+    def arm_sentry(self, on_sentry_callback=None, client_name: str = "Device", grace_seconds: int = 10) -> dict:
+        """Arm the Anti-Theft Sentry with grace period and multi-sensor monitoring."""
+        if self._sentry_active and not self._sentry_ringing:
+            return {
+                "success": True,
+                "active": True,
+                "ringing": False,
+                "message": "Sentry Mode is already ARMED"
+            }
+
+        # Reset any prior alert state cleanly
+        self.disarm_sentry("Internal Re-Arm")
+
+        self._sentry_active = True
+        self._sentry_ringing = False
+        self._sentry_stop_event = threading.Event()
+        self._sentry_callback = on_sentry_callback
+        self._sentry_grace_seconds = max(3, int(grace_seconds))
+        self._sentry_armed_at = time.time() + self._sentry_grace_seconds
+
+        # Detect initial power state
+        try:
+            bat = psutil.sensors_battery()
+            self._sentry_initial_plugged = bat.power_plugged if bat else True
+        except Exception:
+            self._sentry_initial_plugged = True
+
+        audit_log.log("SENTRY_ARMED", f"Anti-Theft Sentry ARMED with {self._sentry_grace_seconds}s grace period", client_name)
+
+        def sentry_worker():
+            try:
+                import pyautogui
+                from webcam_capture import webcam
+                
+                # Wait for grace period countdown to complete
+                while self._sentry_active and time.time() < self._sentry_armed_at:
+                    if self._sentry_stop_event.is_set():
+                        return
+                    time.sleep(0.2)
+
+                if not self._sentry_active or self._sentry_stop_event.is_set():
+                    return
+
+                # Record baseline positions once armed
+                last_pos = pyautogui.position()
+                audit_log.log("SENTRY_ACTIVE", "Anti-Theft Sentry is now fully monitoring laptop sensors", "Sentry Engine")
+                self._notify_status_listener()
+
+                while self._sentry_active and not self._sentry_ringing:
+                    if self._sentry_stop_event.is_set():
+                        break
+                    time.sleep(0.3)
+                    if not self._sentry_active:
+                        break
+
+                    # 1. Tripwire: Charger Unplugged Check
+                    try:
+                        bat = psutil.sensors_battery()
+                        if bat is not None and self._sentry_initial_plugged and not bat.power_plugged:
+                            self.trigger_sentry_alarm(
+                                reason="🔌 Charger cable was unplugged / disconnected!",
+                                client_name="Sentry Power Monitor"
+                            )
+                            break
+                    except Exception:
+                        pass
+
+                    # 2. Tripwire: Physical Mouse / Touchpad Motion Check
+                    cur_pos = pyautogui.position()
+                    dx = abs(cur_pos.x - last_pos.x)
+                    dy = abs(cur_pos.y - last_pos.y)
+                    if dx > 25 or dy > 25:
+                        self.trigger_sentry_alarm(
+                            reason=f"🖱️ Laptop / Touchpad moved ({dx}px, {dy}px)!",
+                            client_name="Sentry Motion Sensor"
+                        )
+                        break
+                    last_pos = cur_pos
+
+            except Exception as e:
+                print(f"[Sentry Worker Error]: {e}")
+
+        self._sentry_thread = threading.Thread(target=sentry_worker, daemon=True)
+        self._sentry_thread.start()
+
+        return {
+            "success": True,
+            "active": True,
+            "grace_seconds": self._sentry_grace_seconds,
+            "initial_plugged": self._sentry_initial_plugged,
+            "message": f"🚨 Sentry Mode Armed! ({self._sentry_grace_seconds}s countdown)"
+        }
+
+    def trigger_sentry_alarm(self, reason: str = "Physical tripwire triggered", client_name: str = "Sentry Engine"):
+        """Trigger full alarm: Force volume 100%, police siren loop, visual screen lockdown, stealth webcam photo."""
+        if not self._sentry_active or self._sentry_ringing:
+            return
+
+        self._sentry_ringing = True
+        self._sentry_stop_event.clear()
+        audit_log.log("SENTRY_TRIGGERED", f"🚨 THEFT ALARM TRIGGERED: {reason}", client_name)
+
+        # 1. Force Max Volume quickly (non-blocking)
+        self._force_max_volume()
+
+        # 2. Stealth Webcam Snapshot (quick capture)
+        photo_b64 = None
+        try:
+            from webcam_capture import webcam
+            photo_b64 = webcam.capture_snapshot_base64(quality=50)
+        except Exception as e:
+            print(f"[Sentry Photo Error]: {e}")
+
+        timestr = time.strftime("%Y-%m-%d %I:%M:%S %p")
+        self._last_sentry_alert = {
+            "time": timestr,
+            "photo": photo_b64,
+            "reason": reason,
+            "status": "triggered"
+        }
+
+        # 3. Notify Phone via Callback
+        if self._sentry_callback:
+            try:
+                self._sentry_callback(self._last_sentry_alert)
+            except Exception as e:
+                print(f"[Sentry Callback Error]: {e}")
+
+        # 4. Start Police Siren Audio Loop (fast response to stop event)
+        def siren_player():
+            try:
+                import winsound
+                while self._sentry_ringing and not self._sentry_stop_event.is_set():
+                    # Check if PC flash screen was closed by user pressing ESC / Space on PC
+                    if hasattr(self, "_sentry_flash_proc") and self._sentry_flash_proc and self._sentry_flash_proc.poll() is not None:
+                        self.disarm_sentry("PC Screen Key (Esc/Space)")
+                        break
+                    for freq in (950, 1550):
+                        if self._sentry_stop_event.is_set() or not self._sentry_ringing:
+                            break
+                        winsound.Beep(freq, 220)
+                        time.sleep(0.04)
+            except Exception as e:
+                print(f"[Sentry Siren Audio Error]: {e}")
+
+        self._sentry_siren_thread = threading.Thread(target=siren_player, daemon=True)
+        self._sentry_siren_thread.start()
+
+        # 5. Visual Screen Flash Banner on PC (Separate Subprocess: 100% non-blocking & isolated)
+        self._launch_flash_screen(reason)
+
+    def _launch_flash_screen(self, reason: str):
+        """Launch isolated Tkinter warning screen in detached subprocess."""
+        try:
+            screen_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sentry_screen.py")
+            if os.path.exists(screen_script):
+                self._sentry_flash_proc = subprocess.Popen(
+                    [sys.executable, screen_script, reason],
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                )
+        except Exception as e:
+            print(f"[Sentry Screen Subprocess Error]: {e}")
+
+    def disarm_sentry(self, client_name: str = "Device") -> dict:
+        """Disarm the Sentry Mode and silence any active alarm instantly."""
+        was_ringing = self._sentry_ringing
+        self._sentry_active = False
+        self._sentry_ringing = False
+        if hasattr(self, "_sentry_stop_event"):
+            self._sentry_stop_event.set()
+
+        # Terminate flashing subprocess immediately
+        if hasattr(self, "_sentry_flash_proc") and self._sentry_flash_proc:
+            try:
+                self._sentry_flash_proc.terminate()
+                self._sentry_flash_proc.kill()
+            except Exception:
+                pass
+            self._sentry_flash_proc = None
+
+        try:
+            from webcam_capture import webcam
+            webcam.release()
+        except Exception:
+            pass
+
+        audit_log.log("SENTRY_DISARMED", "Anti-Theft Sentry DISARMED and alarm silenced", client_name)
+        self._notify_status_listener()
+        return {
+            "success": True,
+            "active": False,
+            "ringing": False,
+            "was_ringing": was_ringing,
+            "message": "🟢 Anti-Theft Sentry DISARMED & Alarm Silenced!"
+        }
+
+    def _force_max_volume(self):
+        """Quickly maximize Windows Master Volume without blocking."""
+        try:
+            if sys.platform == "win32":
+                VK_VOLUME_UP = 0xAF
+                user32 = ctypes.windll.user32
+                for _ in range(25):
+                    user32.keybd_event(VK_VOLUME_UP, 0, 0, 0)
+                    user32.keybd_event(VK_VOLUME_UP, 0, 2, 0)
+            else:
+                import pyautogui
+                for _ in range(8):
+                    pyautogui.press('volumeup', _pause=False)
+        except Exception:
+            pass
+
+    def is_sentry_active(self) -> bool:
+        return self._sentry_active
+
+    def is_sentry_ringing(self) -> bool:
+        return self._sentry_ringing
+
+    @property
+    def sentry_armed(self) -> bool:
+        return self._sentry_active
+
+    @property
+    def sentry_ringing(self) -> bool:
+        return self._sentry_ringing
+
+    def set_sentry_status_listener(self, listener):
+        self._sentry_status_listener = listener
+
+    def _notify_status_listener(self):
+        if self._sentry_status_listener:
+            try:
+                self._sentry_status_listener()
+            except Exception as e:
+                print(f"[Sentry Listener Error]: {e}")
+
+    def get_security_settings(self) -> dict:
+        return {
+            "guard_active": self._guard_mode_active,
+            "walkaway_enabled": self._walkaway_lock_enabled,
+            "sentry": self.get_sentry_status(),
+            "last_intruder": self._last_intruder_info or {}
+        }
+
+    def get_sentry_status(self) -> dict:
+        now = time.time()
+        is_grace = self._sentry_active and (now < self._sentry_armed_at)
+        remaining_grace = max(0, int(self._sentry_armed_at - now)) if is_grace else 0
+        return {
+            "active": self._sentry_active,
+            "ringing": self._sentry_ringing,
+            "is_grace": is_grace,
+            "grace_remaining": remaining_grace,
+            "initial_plugged": self._sentry_initial_plugged,
+            "last_alert": self._last_sentry_alert or {}
+        }
 
 # Global instance
 system = SystemController()

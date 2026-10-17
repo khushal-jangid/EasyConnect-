@@ -1,5 +1,5 @@
 """
-Pulse Remote - High-Performance Windows Mouse Control Engine
+EasyConnect - High-Performance Windows Mouse Control Engine
 """
 import time
 import sys
@@ -130,5 +130,35 @@ class MouseController:
             if dx != 0:
                 pyautogui.hscroll(int(dx * 50), _pause=False)
 
+    def zoom(self, delta: float):
+        """
+        Perform native Windows zoom (Ctrl + Mouse Wheel).
+        Positive delta = Zoom In, Negative delta = Zoom Out.
+        """
+        if delta == 0:
+            return
+        if self.is_windows:
+            VK_CONTROL = 0x11
+            KEYEVENTF_KEYUP = 0x0002
+            scan_code = self.user32.MapVirtualKeyW(VK_CONTROL, 0)
+            steps = int(delta * WHEEL_DELTA)
+            if steps == 0:
+                steps = WHEEL_DELTA if delta > 0 else -WHEEL_DELTA
+            # Hold Ctrl
+            self.user32.keybd_event(VK_CONTROL, scan_code, 0, 0)
+            time.sleep(0.015)
+            # Scroll wheel
+            self.user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, steps, 0)
+            time.sleep(0.015)
+            # Release Ctrl
+            self.user32.keybd_event(VK_CONTROL, scan_code, KEYEVENTF_KEYUP, 0)
+        else:
+            import pyautogui
+            steps = int(delta * 50) or (50 if delta > 0 else -50)
+            pyautogui.keyDown('ctrl')
+            pyautogui.scroll(steps, _pause=False)
+            pyautogui.keyUp('ctrl')
+
 # Global instance
 mouse = MouseController()
+

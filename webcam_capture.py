@@ -1,5 +1,6 @@
 """
-Pulse Remote v2.0 - PC Webcam Video Streaming Engine
+EasyConnect v2.0 - PC Webcam Video Streaming & Snapshot Engine
+Includes auto-release watchdog to guarantee camera hardware LED turns OFF when not actively in use.
 """
 import io
 import time
@@ -10,7 +11,7 @@ from PIL import Image, ImageDraw
 import config
 
 class WebcamCapture:
-    """Live video streaming from PC's built-in or USB webcam using OpenCV."""
+    """Live video streaming & snapshot capture from PC webcam with auto-release protection."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -18,17 +19,35 @@ class WebcamCapture:
         self._current_cam_id = 0
         self._last_access_time = 0
 
+        # Start auto-release watchdog thread (releases camera if idle > 2.5s)
+        self._watchdog_thread = threading.Thread(target=self._idle_watchdog, daemon=True)
+        self._watchdog_thread.start()
+
+    def _idle_watchdog(self):
+        """Background thread that automatically turns off webcam when no frames are requested."""
+        while True:
+            time.sleep(1.0)
+            with self._lock:
+                if self._cap is not None and (time.time() - self._last_access_time > 2.5):
+                    try:
+                        self._cap.release()
+                    except Exception:
+                        pass
+                    self._cap = None
+
     def _get_capture(self, cam_id: int = 0):
         """Open or reuse OpenCV VideoCapture."""
         import cv2
         if self._cap is None or not self._cap.isOpened() or self._current_cam_id != cam_id:
             if self._cap is not None:
-                self._cap.release()
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
             self._cap = cv2.VideoCapture(cam_id, cv2.CAP_DSHOW)
             if not self._cap.isOpened():
                 self._cap = cv2.VideoCapture(cam_id)
             self._current_cam_id = cam_id
-            # Set ideal stream resolution
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self._last_access_time = time.time()
@@ -39,7 +58,7 @@ class WebcamCapture:
         cams = []
         try:
             import cv2
-            for i in range(2):  # Check index 0 and 1
+            for i in range(2):
                 temp = cv2.VideoCapture(i, cv2.CAP_DSHOW)
                 if temp.isOpened():
                     cams.append({
@@ -55,14 +74,14 @@ class WebcamCapture:
         return cams
 
     def capture_frame_base64(self, cam_id: int = 0, quality: int = config.WEBCAM_JPEG_QUALITY) -> str:
-        """Capture live frame from PC webcam and return base64 JPEG."""
+        """Capture live frame from PC webcam for real-time video streaming."""
         with self._lock:
+            self._last_access_time = time.time()
             try:
                 import cv2
                 cap = self._get_capture(cam_id)
                 ret, frame = cap.read()
                 if ret and frame is not None:
-                    # Encode frame to JPEG
                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
                     result, encimg = cv2.imencode(".jpg", frame, encode_param)
                     if result:
@@ -80,8 +99,47 @@ class WebcamCapture:
             b64 = base64.b64encode(buf.getvalue()).decode("ascii")
             return f"data:image/jpeg;base64,{b64}"
 
+    def capture_snapshot_base64(self, cam_id: int = 0, quality: int = 65) -> str:
+        """Capture a single photo and IMMEDIATELY release camera so hardware LED turns OFF."""
+        with self._lock:
+            b64_res = None
+            try:
+                import cv2
+                cap = self._get_capture(cam_id)
+                # Read 2 frames so sensor auto-exposure adjusts
+                for _ in range(2):
+                    ret, frame = cap.read()
+                if ret and frame is not None:
+                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+                    result, encimg = cv2.imencode(".jpg", frame, encode_param)
+                    if result:
+                        b64 = base64.b64encode(encimg).decode("ascii")
+                        b64_res = f"data:image/jpeg;base64,{b64}"
+            except Exception as e:
+                print(f"[Webcam Snapshot Error]: {e}")
+            finally:
+                # Release camera immediately so camera LED never stays on
+                if self._cap is not None:
+                    try:
+                        self._cap.release()
+                    except Exception:
+                        pass
+                    self._cap = None
+
+            if b64_res:
+                return b64_res
+
+            # Fallback placeholder
+            img = Image.new("RGB", (640, 480), color=(15, 23, 42))
+            draw = ImageDraw.Draw(img)
+            draw.text((220, 230), "Intruder Detected (Camera Busy)", fill=(0, 242, 254))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=50)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            return f"data:image/jpeg;base64,{b64}"
+
     def release(self):
-        """Release camera resource to turn off camera LED when not streaming."""
+        """Release camera resource to turn off camera LED immediately."""
         with self._lock:
             if self._cap is not None:
                 try:

@@ -1,5 +1,5 @@
 """
-Pulse Remote v2.0 - Universal Native Windows Clipboard Sync & History
+EasyConnect v2.0 - Universal Native Windows Clipboard Sync & History
 """
 import sys
 import time

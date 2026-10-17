@@ -1,5 +1,5 @@
 """
-Pulse Remote v2.0 - Cryptographic Authentication, Session & Granular Permission Engine
+EasyConnect v2.0 - Cryptographic Authentication, Session & Granular Permission Engine
 """
 import os
 import json
