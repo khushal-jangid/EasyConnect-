@@ -7,7 +7,7 @@
   <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <link rel="apple-touch-icon" href="/static/icon.png">
-  <link rel="stylesheet" href="/static/style.css?v=4.1">
+  <link rel="stylesheet" href="/static/style.css?v=5.2">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
@@ -25,15 +25,18 @@
       <p class="pair-desc">Connecting to <span id="target-pc-name" class="highlight">Windows PC</span></p>
 
       <div id="pair-status-box" class="status-box">
-        <span class="spinner"></span>
-        <span id="pair-status-text">Validating QR token...</span>
+        <span class="spinner" id="pair-spinner" style="display: none;"></span>
+        <span id="pair-status-text">Ready to connect</span>
       </div>
 
-      <div class="manual-pair-box" id="manual-pair-box" style="display: none; margin-top: 16px;">
+      <div class="manual-pair-box" id="manual-pair-box" style="margin-top: 16px;">
         <p style="font-size: 13px; font-weight: 700; color: var(--text-main); margin-bottom: 4px;">Enter 6-Digit PIN from PC:</p>
-        <p style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">Check your PC Agent window for the 6-digit PIN</p>
-        <input type="text" id="manual-token-input" placeholder="e.g. 583920" class="input-field" style="font-family: var(--font-mono); font-size: 18px; text-align: center; letter-spacing: 4px; font-weight: 800;">
-        <button id="manual-pair-btn" class="btn btn-primary" style="margin-top: 10px; width: 100%;">Connect to PC</button>
+        <p style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">Check your PC Agent terminal or window for the 6-digit PIN</p>
+        <input type="text" id="manual-token-input" placeholder="e.g. 583920" maxlength="6" inputmode="numeric" class="input-field" style="font-family: var(--font-mono); font-size: 20px; text-align: center; letter-spacing: 6px; font-weight: 800;">
+        <button id="manual-pair-btn" class="btn btn-primary" style="margin-top: 10px; width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;">
+          <span id="manual-pair-spinner" class="spinner" style="display: none; width: 14px; height: 14px; border-width: 2px;"></span>
+          <span id="manual-pair-btn-text">Connect to PC</span>
+        </button>
       </div>
     </div>
   </div>
@@ -51,6 +54,9 @@
         </div>
       </div>
       <div class="header-right">
+        <button id="btn-voice-control" class="btn-action-voice" title="Voice Commands & Speech Dictation">
+          <span>🎙️ Voice</span>
+        </button>
         <button id="btn-panic-mode" class="btn-action-panic" title="Boss Key: Hide screen & mute sound instantly">
           <span>🚨 Boss</span>
         </button>
@@ -527,6 +533,7 @@
         <div class="segmented-pills">
           <button class="file-pill active" data-filetab="files">📁 File Explorer</button>
           <button class="file-pill" data-filetab="clipboard">📋 Clipboard Sync</button>
+          <button class="file-pill" data-filetab="media">🎬 PC Media Server</button>
         </div>
 
         <!-- Sub: File Explorer -->
@@ -584,6 +591,54 @@
             <div style="margin-top: 16px;">
               <span class="card-section-label">🕒 RECENT CLIPBOARD HISTORY</span>
               <div id="clip-history-container" class="history-chips"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sub: PC Media Server -->
+        <div id="filetab-media" class="file-sub-panel">
+          <div class="app-card">
+            <div class="card-header">
+              <div class="flex gap-2" style="align-items: center;">
+                <span style="font-size: 22px;">🎬</span>
+                <div>
+                  <h3>PC Media Server</h3>
+                  <p style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Stream PC movies, music & photos directly to phone</p>
+                </div>
+              </div>
+              <button id="btn-refresh-media" class="btn btn-sm btn-tool">↻ Rescan</button>
+            </div>
+
+            <!-- Media Category Filter Pills -->
+            <div class="media-filter-bar">
+              <button class="media-filter-pill active" data-media-type="all">✨ All</button>
+              <button class="media-filter-pill" data-media-type="video">🎬 Videos</button>
+              <button class="media-filter-pill" data-media-type="audio">🎵 Music</button>
+              <button class="media-filter-pill" data-media-type="image">🖼️ Photos</button>
+            </div>
+
+            <!-- Media Search / Quick Filter Input -->
+            <div class="type-box" style="margin-top: 10px; margin-bottom: 8px;">
+              <input type="text" id="media-search-input" placeholder="Search movies, tracks, photos..." class="input-field" style="padding: 10px 14px; font-size: 12px;">
+            </div>
+
+            <!-- Media Folders Bar (Chips of scanned PC folders) -->
+            <div id="media-folders-chips" class="quick-folders" style="margin-bottom: 10px;"></div>
+
+            <!-- Media Stats Count Banner -->
+            <div class="media-stats-banner">
+              <span id="media-counts-text">Scanning PC media library...</span>
+              <span id="media-active-filter-badge" class="badge-tag-mini" style="font-size: 10px; color: var(--cyan); background: rgba(0, 242, 254, 0.12); padding: 2px 7px; border-radius: 6px; font-weight: 800;">Local Wi-Fi Stream</span>
+            </div>
+
+            <!-- Media Grid of Cards -->
+            <div id="media-grid-container" class="media-grid" style="margin-top: 12px;">
+              <div class="empty-state" style="grid-column: 1 / -1; padding: 32px 16px; text-align: center;">
+                <div style="font-size: 32px; margin-bottom: 8px;">🎬</div>
+                <div style="font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 4px;">PC Media Server</div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 12px;">Stream movies, music & photos from your PC</div>
+                <button class="btn btn-sm btn-tool" style="margin: 0 auto;" onclick="loadMediaLibrary()">📁 Load Media Files</button>
+              </div>
             </div>
           </div>
         </div>
@@ -891,8 +946,78 @@
       </div>
     </div>
 
+    <!-- Media Stream Player Modal (Video / Audio Fullscreen Player) -->
+    <div id="modal-media-player" class="modal-overlay hidden">
+      <div class="modal-card modal-media-card">
+        <div class="card-header" style="margin-bottom: 10px;">
+          <div class="flex gap-2" style="align-items: center; min-width: 0;">
+            <span id="player-media-icon" style="font-size: 18px;">🎬</span>
+            <div style="min-width: 0;">
+              <h4 id="player-media-title" style="font-size: 13px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Playing Video</h4>
+              <span id="player-media-sub" style="font-size: 10px; color: var(--text-muted); font-family: var(--font-mono);">0 MB • MP4</span>
+            </div>
+          </div>
+          <button id="btn-close-media-player" class="btn btn-sm btn-tool" style="padding: 4px 8px; border-radius: 50%;">✕</button>
+        </div>
+
+        <!-- Video Viewport -->
+        <div class="player-viewport-wrap" id="player-video-viewport">
+          <video id="media-html5-video" class="player-video-element" controls playsinline preload="metadata"></video>
+        </div>
+
+        <!-- Audio Viewport (Music playback with animated vinyl disk) -->
+        <div class="player-audio-wrap hidden" id="player-audio-viewport">
+          <div class="audio-disc-visual">
+            <span class="audio-disc-icon">🎵</span>
+          </div>
+          <audio id="media-html5-audio" controls class="player-audio-element" style="width: 100%; margin-top: 14px;"></audio>
+        </div>
+
+        <!-- Image Lightbox Viewport -->
+        <div class="player-image-wrap hidden" id="player-image-viewport">
+          <img id="media-lightbox-img" src="" alt="Photo Preview" class="lightbox-img">
+        </div>
+
+        <!-- Dual Playback Action Bar: Phone Stream vs PC Screen Launch -->
+        <div class="flex gap-2" style="margin-top: 14px;">
+          <button id="btn-play-on-pc" class="btn btn-primary" style="flex: 1.4; font-size: 11.5px; font-weight: 800; background: linear-gradient(135deg, #0ea5e9, #0284c7); border-color: rgba(14, 165, 233, 0.4);">
+            <span>🖥️ Play on PC Screen</span>
+          </button>
+          <a id="btn-download-media-direct" href="#" download class="btn btn-tool" style="flex: 1; font-size: 11.5px; font-weight: 700; text-decoration: none;">
+            <span>⬇ Download</span>
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Voice Commands & Speech-to-PC Assistant -->
+    <div id="modal-voice-assistant" class="screen-overlay hidden" style="backdrop-filter: blur(20px); background: rgba(5, 7, 15, 0.85); z-index: 10000; align-items: center; justify-content: center; padding: 20px;">
+      <div class="voice-assistant-card" style="max-width: 360px; width: 100%; text-align: center; background: rgba(15, 23, 42, 0.95); border: 1px solid rgba(14, 165, 233, 0.35); border-radius: 24px; padding: 26px 20px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.85);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+          <span style="font-size: 11px; font-weight: 800; letter-spacing: 1.5px; color: var(--cyan); text-transform: uppercase;">🎙️ Speech-to-PC</span>
+          <button id="btn-close-voice-modal" style="background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; padding: 4px;">✕</button>
+        </div>
+
+        <div class="voice-mic-halo-wrap" id="voice-halo" style="margin: 18px auto; width: 84px; height: 84px; border-radius: 50%; background: linear-gradient(135deg, rgba(14, 165, 233, 0.25), rgba(99, 102, 241, 0.25)); display: flex; align-items: center; justify-content: center; position: relative;">
+          <div id="voice-mic-wave" class="voice-mic-wave" style="position: absolute; inset: -8px; border-radius: 50%; border: 2px solid var(--cyan); opacity: 0; pointer-events: none; transition: all 0.3s;"></div>
+          <button id="btn-toggle-voice-recording" style="width: 66px; height: 66px; border-radius: 50%; background: linear-gradient(135deg, #0ea5e9, #38bdf8); border: none; font-size: 28px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 24px rgba(14, 165, 233, 0.4); transition: all 0.2s;">
+            🎙️
+          </button>
+        </div>
+
+        <div id="voice-status-label" style="font-size: 13.5px; font-weight: 800; color: #fff; margin-bottom: 6px;">Tap Mic to Speak</div>
+        <div id="voice-transcript-box" style="min-height: 52px; background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; padding: 12px 14px; font-size: 12.5px; color: var(--text-muted); font-style: italic; margin-bottom: 14px; display: flex; align-items: center; justify-content: center; word-break: break-word;">
+          "Open Chrome", "Mute", or speak any sentence to type into PC...
+        </div>
+
+        <div style="font-size: 10.5px; color: var(--text-dim); line-height: 1.4;">
+          ⚡ Speaks commands in English or Hindi • Dictation auto-types into active PC window
+        </div>
+      </div>
+    </div>
+
   </div>
 
-  <script src="/static/app.js?v=4.1"></script>
+  <script src="/static/app.js?v=5.2"></script>
 </body>
 </html>

@@ -61,6 +61,14 @@ class PulseAgentCLI:
         self.server_thread = threading.Thread(target=self._run_async_server, daemon=True)
         self.server_thread.start()
 
+    def _open_in_browser(self):
+        token = getattr(self, "current_token", None)
+        if not token:
+            current = auth_manager.get_current_pairing_token()
+            token = current[0] if current else None
+        url = qr_manager.get_direct_pairing_url(token) if token else qr_manager.get_server_url()
+        webbrowser.open(url)
+
     def _run_async_server(self):
         """Asynchronous server execution loop."""
         loop = asyncio.new_event_loop()
@@ -203,7 +211,12 @@ class PulseAgentCLI:
                             self.on_device_disconnected()
                         elif char == 'o':
                             print("\n[Action] Opening controller in PC browser...", flush=True)
-                            webbrowser.open(qr_manager.get_server_url())
+                            token = self.current_token
+                            if not token:
+                                current = auth_manager.get_current_pairing_token()
+                                token = current[0] if current else None
+                            url = qr_manager.get_direct_pairing_url(token) if token else qr_manager.get_server_url()
+                            webbrowser.open(url)
                         elif char == 'u':
                             print("\n[Update] Checking & applying latest update...", flush=True)
                             res = auto_updater.apply_update()
@@ -470,7 +483,7 @@ class PulseAgentGUI:
             bd=0,
             pady=3,
             cursor="hand2",
-            command=lambda: webbrowser.open(qr_manager.get_server_url()),
+            command=self._open_in_browser,
         )
         btn_web.pack(pady=(4, 8))
 

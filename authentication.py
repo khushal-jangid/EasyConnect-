@@ -109,9 +109,7 @@ class AuthManager:
             if not secrets.compare_digest(expected_clean, token_clean):
                 return None
             
-            # Token is valid: immediately invalidate the pairing token
-            self._current_pairing_token = None
-            self._pairing_token_expires_at = 0.0
+            # Token is valid: keep active for lifespan so reloads/multiple tabs do not fail
             
             # Generate long-lived session token
             session_token = secrets.token_hex(32)
@@ -158,6 +156,26 @@ class AuthManager:
             
             self._sessions[session_token] = session_data
             audit_log.log("DEVICE_PAIRED", f"Paired with device '{client_name}' ({client_id})", client_name, client_ip)
+            return session_token
+
+    def create_local_session(self, client_info: Optional[Dict[str, Any]] = None) -> str:
+        """Create an instant authorized session for local loopback connections (127.0.0.1 / localhost)."""
+        with self._lock:
+            session_token = secrets.token_hex(32)
+            now = int(time.time())
+            client_id = client_info.get("device_id", "local-pc") if client_info else "local-pc"
+            client_name = client_info.get("name", "Local PC Browser") if client_info else "Local PC Browser"
+            client_ip = client_info.get("ip", "127.0.0.1") if client_info else "127.0.0.1"
+            perms = config.DEFAULT_PERMISSIONS.copy()
+            self._sessions[session_token] = {
+                "session_token": session_token,
+                "client_id": client_id,
+                "client_name": client_name,
+                "client_ip": client_ip,
+                "created_at": now,
+                "last_active": now,
+                "permissions": perms,
+            }
             return session_token
 
     def validate_session(self, session_token: str) -> Optional[Dict[str, Any]]:

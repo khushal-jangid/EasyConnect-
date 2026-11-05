@@ -113,6 +113,7 @@ def build():
         "--hidden-import", "aiortc",
         "--hidden-import", "av",
         "--hidden-import", "auto_updater",
+        "--hidden-import", "media_server",
         "--distpath", str(dist_dir),
         "--workpath", str(build_dir),
         "--specpath", str(base_dir),

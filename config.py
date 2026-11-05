@@ -37,7 +37,7 @@ def get_or_create_device_id() -> str:
 HOST = "0.0.0.0"
 PORT = 8000
 SERVER_NAME = "EasyConnect Agent v2.1"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 GITHUB_REPO = "khushal-jangid/pulse-remote-pc"
 
 # Device Information
@@ -71,6 +71,11 @@ ALLOWLISTED_APPS = {
         "name": "Google Chrome",
         "icon": "🌐",
         "command": ["cmd.exe", "/c", "start", "chrome"],
+    },
+    "youtube": {
+        "name": "YouTube",
+        "icon": "▶️",
+        "command": ["cmd.exe", "/c", "start", "https://youtube.com"],
     },
     "vscode": {
         "name": "VS Code",

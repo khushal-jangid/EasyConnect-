@@ -21,6 +21,7 @@ from system_control import system
 from window_monitor import window_monitor
 from activity_log import audit_log
 from auto_updater import auto_updater
+from media_server import media_server
 
 # Resolve asset directories for dev & PyInstaller bundles
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -67,6 +68,15 @@ class NetworkServer:
         self.app.router.add_get("/api/files/download", self.handle_file_download)
         self.app.router.add_post("/api/files/upload", self.handle_file_upload)
         self.app.router.add_get("/api/security/logs", self.handle_security_logs)
+
+        # Media Server Streaming & Management Routes
+        self.app.router.add_get("/api/media/library", self.handle_media_library)
+        self.app.router.add_get("/api/media/stream", self.handle_media_stream)
+        self.app.router.add_get("/api/media/thumbnail", self.handle_media_thumbnail)
+        self.app.router.add_post("/api/media/play_pc", self.handle_media_play_pc)
+        self.app.router.add_post("/api/media/folders/add", self.handle_media_add_folder)
+        self.app.router.add_post("/api/media/folders/remove", self.handle_media_remove_folder)
+
         self.app.router.add_get("/ws", self.handle_websocket)
 
         # Web Client
@@ -120,8 +130,16 @@ class NetworkServer:
             if not token:
                 return web.json_response({"error": "Missing pairing_token"}, status=400)
 
-            client_info = {"device_id": data.get("device_id", "phone"), "name": data.get("name", "Smartphone"), "ip": request.remote}
-            session_token = auth_manager.validate_and_consume_pairing_token(token, client_info)
+            is_loopback = request.remote in ("127.0.0.1", "::1", "localhost")
+            client_info = {
+                "device_id": data.get("device_id", "phone"),
+                "name": data.get("name", "Local PC Browser" if is_loopback else "Smartphone"),
+                "ip": request.remote
+            }
+            if is_loopback and str(token).lower() in ("local", "localhost", "auto"):
+                session_token = auth_manager.create_local_session(client_info)
+            else:
+                session_token = auth_manager.validate_and_consume_pairing_token(token, client_info)
             if not session_token:
                 return web.json_response({"error": "Invalid or expired pairing token"}, status=401)
 
@@ -166,6 +184,72 @@ class NetworkServer:
             return web.json_response(res)
 
         return web.json_response({"error": "No file uploaded"}, status=400)
+
+    async def handle_media_library(self, request):
+        token = request.headers.get("X-Session-Token") or request.query.get("token")
+        if not auth_manager.validate_session(token):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        category = request.query.get("category", "all")
+        target_path = request.query.get("path")
+        data = await asyncio.to_thread(media_server.scan_library, category, target_path)
+        return web.json_response(data)
+
+    async def handle_media_stream(self, request):
+        token = request.headers.get("X-Session-Token") or request.query.get("token")
+        if not auth_manager.validate_session(token):
+            return web.Response(text="Unauthorized", status=401)
+        file_path = request.query.get("path")
+        if not file_path or not os.path.isfile(file_path):
+            return web.Response(text="Media file not found", status=404)
+        return web.FileResponse(file_path)
+
+    async def handle_media_thumbnail(self, request):
+        token = request.headers.get("X-Session-Token") or request.query.get("token")
+        if not auth_manager.validate_session(token):
+            return web.Response(text="Unauthorized", status=401)
+        file_path = request.query.get("path")
+        if not file_path or not os.path.isfile(file_path):
+            return web.Response(status=404)
+        thumb = await asyncio.to_thread(media_server.get_or_create_thumbnail, file_path)
+        if thumb and thumb.exists():
+            return web.FileResponse(thumb)
+        return web.Response(status=404)
+
+    async def handle_media_play_pc(self, request):
+        token = request.headers.get("X-Session-Token") or request.query.get("token")
+        session_info = auth_manager.validate_session(token)
+        if not session_info:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+            file_path = data.get("path")
+            client_name = session_info.get("client_name", "Smartphone")
+            res = media_server.play_on_pc(file_path, client_name)
+            return web.json_response(res)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_media_add_folder(self, request):
+        token = request.headers.get("X-Session-Token") or request.query.get("token")
+        if not auth_manager.validate_session(token):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+            folder = data.get("path", "")
+            return web.json_response(media_server.add_custom_folder(folder))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_media_remove_folder(self, request):
+        token = request.headers.get("X-Session-Token") or request.query.get("token")
+        if not auth_manager.validate_session(token):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+            folder = data.get("path", "")
+            return web.json_response(media_server.remove_custom_folder(folder))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
 
     def broadcast_event(self, event: str, data: dict):
         """Thread-safe event broadcast to all active WebSocket clients."""
@@ -566,6 +650,18 @@ class NetworkServer:
         elif event == "update:apply":
             res = auto_updater.apply_update()
             await ws.send_json({"event": "system:update_result", "data": res})
+
+        # 16. Media Server Library & Remote PC Play
+        elif event == "media_server:library":
+            data = media_server.scan_library(
+                category=payload.get("category", "all"),
+                target_path=payload.get("path")
+            )
+            await ws.send_json({"event": "media_server:library_data", "data": data})
+
+        elif event == "media_server:play_pc":
+            res = media_server.play_on_pc(payload.get("path", ""), client_name)
+            await ws.send_json({"event": "media_server:play_pc_result", "data": res})
 
     async def _walkaway_watchdog(self):
         """Active proximity watcher: Locks PC if client heartbeat stops for > 8 seconds."""

@@ -17,4 +17,6 @@ dist/
 .device_id
 .paired_devices.json
 .custom_remotes.json
+.media_thumbs/
+.media_folders.json
 test_*.ico

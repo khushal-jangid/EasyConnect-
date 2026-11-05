@@ -57,10 +57,44 @@
 
   const pairingScreen = document.getElementById("pairing-screen");
   const appContainer = document.getElementById("app-container");
+  const pairStatusBox = document.getElementById("pair-status-box");
+  const pairSpinner = document.getElementById("pair-spinner");
   const pairStatusText = document.getElementById("pair-status-text");
   const connectedPcName = document.getElementById("connected-pc-name");
   const latencyBadge = document.getElementById("latency-badge");
   const manualPairBox = document.getElementById("manual-pair-box");
+  const manualTokenInput = document.getElementById("manual-token-input");
+  const manualPairBtn = document.getElementById("manual-pair-btn");
+  const manualPairBtnText = document.getElementById("manual-pair-btn-text");
+  const manualPairSpinner = document.getElementById("manual-pair-spinner");
+
+  function clearAllSessions() {
+    localStorage.removeItem("easyconnect_session_token");
+    localStorage.removeItem("pulse_session_token");
+    sessionToken = null;
+  }
+
+  function setPairingState(state, message = "") {
+    if (pairStatusText) {
+      pairStatusText.textContent = message || "";
+      pairStatusText.style.color = state === "error" ? "var(--red)" : "var(--text-muted)";
+    }
+    if (pairSpinner) {
+      pairSpinner.style.display = state === "loading" ? "inline-block" : "none";
+    }
+    if (manualPairSpinner) {
+      manualPairSpinner.style.display = state === "loading" ? "inline-block" : "none";
+    }
+    if (manualPairBtn) {
+      manualPairBtn.disabled = state === "loading";
+    }
+    if (manualPairBtnText) {
+      manualPairBtnText.textContent = state === "loading" ? "Connecting..." : "Connect to PC";
+    }
+    if (manualPairBox) {
+      manualPairBox.style.display = state === "connected" ? "none" : "block";
+    }
+  }
 
   window.addEventListener("DOMContentLoaded", () => {
     setupMainTabs();
@@ -81,28 +115,64 @@
     setupSecurityControls();
     setupLiveHUDLoop();
     setupAutoUpdater();
+    setupMediaServer();
+    setupVoiceAssistant();
 
     const urlParams = new URLSearchParams(window.location.search);
     const pairToken = urlParams.get("pair");
+    const isLoopback = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
 
     if (pairToken) {
-      pairStatusText.textContent = "Pairing with PC...";
+      setPairingState("loading", "Validating pairing token...");
       performPairing(pairToken);
     } else if (sessionToken) {
-      pairStatusText.textContent = "Connecting to PC...";
+      setPairingState("loading", "Connecting to PC session...");
+      
+      if (window._authWatchdog) clearTimeout(window._authWatchdog);
+      window._authWatchdog = setTimeout(() => {
+        if (!isConnected) {
+          console.warn("[Auth] Session connection watchdog triggered. Prompting PIN.");
+          clearAllSessions();
+          try { if (ws) ws.close(); } catch (e) {}
+          setPairingState("idle", "PC restarted or session expired. Enter 6-digit PIN:");
+          manualTokenInput?.focus();
+        }
+      }, 3500);
+
       connectWebSocket();
+    } else if (isLoopback) {
+      setPairingState("loading", "Connecting to local PC...");
+      performPairing("local");
     } else {
-      pairStatusText.textContent = "Scan QR code or enter token:";
-      manualPairBox.style.display = "block";
+      setPairingState("idle", "Scan QR code or enter 6-digit PIN from PC:");
+      manualTokenInput?.focus();
     }
 
-    document.getElementById("manual-pair-btn")?.addEventListener("click", () => {
-      const manualToken = document.getElementById("manual-token-input").value.trim();
+    manualPairBtn?.addEventListener("click", () => {
+      const manualToken = manualTokenInput?.value.trim();
       if (manualToken) performPairing(manualToken);
+    });
+
+    manualTokenInput?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const manualToken = manualTokenInput?.value.trim();
+        if (manualToken) performPairing(manualToken);
+      }
+    });
+
+    manualTokenInput?.addEventListener("input", (e) => {
+      const digits = e.target.value.replace(/\D/g, "");
+      e.target.value = digits;
+      if (digits.length === 6) {
+        performPairing(digits);
+      }
     });
   });
 
   async function performPairing(token) {
+    if (!token) return;
+    setPairingState("loading", "Connecting to PC...");
     try {
       const res = await fetch("/api/pair", {
         method: "POST",
@@ -117,23 +187,32 @@
       if (data.success && data.session_token) {
         sessionToken = data.session_token;
         localStorage.setItem("pulse_session_token", sessionToken);
+        localStorage.setItem("easyconnect_session_token", sessionToken);
         pcDeviceName = data.device_name || "Windows PC";
         window.history.replaceState({}, document.title, window.location.pathname);
+        setPairingState("loading", "Authenticating stream...");
         connectWebSocket();
       } else {
-        showPairError(data.error || "Pairing token expired or invalid.");
+        clearAllSessions();
+        setPairingState("error", data.error || "Pairing token expired or invalid.");
+        manualTokenInput?.focus();
       }
     } catch (err) {
-      showPairError("Unable to connect. Ensure phone is on the same Wi-Fi as PC.");
+      clearAllSessions();
+      setPairingState("error", "Unable to connect. Ensure phone is on the same Wi-Fi as PC.");
+      manualTokenInput?.focus();
     }
   }
 
   function showPairError(msg) {
-    pairStatusText.textContent = msg;
-    manualPairBox.style.display = "block";
+    clearAllSessions();
+    setPairingState("error", msg);
   }
 
   function connectWebSocket() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.close(); } catch (e) {}
+    }
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     ws = new WebSocket(wsUrl);
@@ -157,11 +236,22 @@
         clearInterval(proximityPingInterval);
         proximityPingInterval = null;
       }
+      if (!sessionToken) return;
+
       reconnectAttempts++;
+      if (reconnectAttempts > 3) {
+        clearAllSessions();
+        pairingScreen.classList.remove("hidden");
+        appContainer.classList.add("hidden");
+        setPairingState("error", "PC unreachable or agent restarted. Enter 6-digit PIN:");
+        manualTokenInput?.focus();
+        return;
+      }
+
       latencyBadge.textContent = `Reconnecting (${reconnectAttempts})...`;
       setTimeout(() => {
         if (sessionToken) connectWebSocket();
-      }, Math.min(5000, 1000 * reconnectAttempts));
+      }, Math.min(3000, 1000 * reconnectAttempts));
     };
 
     ws.onerror = () => { ws.close(); };
@@ -197,9 +287,15 @@
     const { event, data } = msg;
 
     if (event === "auth_success") {
+      if (window._authWatchdog) {
+        clearTimeout(window._authWatchdog);
+        window._authWatchdog = null;
+      }
       isConnected = true;
+      reconnectAttempts = 0;
       pairingScreen.classList.add("hidden");
       appContainer.classList.remove("hidden");
+      setPairingState("connected");
       pcDeviceName = data.device_name || "Windows PC";
       connectedPcName.textContent = pcDeviceName;
       latencyBadge.textContent = "🟢 Direct Wi-Fi";
@@ -212,11 +308,15 @@
       if (activeTab === "system") refreshSystemData();
       if (activeTab === "security") sendWS("security:logs");
     } else if (event === "auth_error") {
-      localStorage.removeItem("pulse_session_token");
-      sessionToken = null;
+      if (window._authWatchdog) {
+        clearTimeout(window._authWatchdog);
+        window._authWatchdog = null;
+      }
+      clearAllSessions();
       pairingScreen.classList.remove("hidden");
       appContainer.classList.add("hidden");
-      showPairError("Session expired. Please scan a new QR code.");
+      setPairingState("error", "Session expired. Enter 6-digit PIN from PC:");
+      manualTokenInput?.focus();
     } else if (event === "permission_denied") {
       alert(`⚠️ ${data.message}`);
     } else if (event === "screen:frame_data") {
@@ -400,6 +500,7 @@
         document.querySelectorAll(".file-sub-panel").forEach((p) => p.classList.remove("active"));
         document.getElementById(`filetab-${filetab}`)?.classList.add("active");
         if (filetab === "clipboard") sendWS("clipboard:get");
+        if (filetab === "media") loadMediaLibrary(currentActiveMediaFilter, currentSelectedFolder);
       });
     });
   }
@@ -2047,6 +2148,482 @@
         sendWS("system:stats");
       }
     }, 2000);
+  }
+
+  // --- 6. PC Media Server & Instant Local Streaming Player ---
+  let cachedMediaItems = [];
+  let currentActiveMediaFilter = "all";
+  let currentSelectedFolder = null;
+  let activePlayingMedia = null;
+
+  function setupMediaServer() {
+    const refreshBtn = document.getElementById("btn-refresh-media");
+    const searchInput = document.getElementById("media-search-input");
+    const filterPills = document.querySelectorAll(".media-filter-pill");
+    const closePlayerBtn = document.getElementById("btn-close-media-player");
+    const playOnPcBtn = document.getElementById("btn-play-on-pc");
+    const playerModal = document.getElementById("modal-media-player");
+
+    refreshBtn?.addEventListener("click", () => {
+      vibrate(15);
+      loadMediaLibrary(currentActiveMediaFilter, currentSelectedFolder);
+    });
+
+    searchInput?.addEventListener("input", (e) => {
+      filterAndRenderMediaItems(e.target.value.toLowerCase().trim());
+    });
+
+    filterPills.forEach((pill) => {
+      pill.addEventListener("click", () => {
+        vibrate(10);
+        filterPills.forEach((p) => p.classList.remove("active"));
+        pill.classList.add("active");
+        currentActiveMediaFilter = pill.dataset.mediaType || "all";
+        loadMediaLibrary(currentActiveMediaFilter, currentSelectedFolder);
+      });
+    });
+
+    closePlayerBtn?.addEventListener("click", () => {
+      closeMediaPlayer();
+    });
+
+    playerModal?.addEventListener("click", (e) => {
+      if (e.target === playerModal) {
+        closeMediaPlayer();
+      }
+    });
+
+    playOnPcBtn?.addEventListener("click", async () => {
+      vibrate(20);
+      if (!activePlayingMedia) return;
+      playOnPcBtn.disabled = true;
+      playOnPcBtn.textContent = "Launching on PC...";
+      try {
+        const res = await fetch("/api/media/play_pc", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Session-Token": sessionToken,
+          },
+          body: JSON.stringify({ path: activePlayingMedia.path }),
+        });
+        const json = await res.json();
+        if (json.success) {
+          showToast(`🖥️ Playing on PC: ${json.filename}`, "success");
+        } else {
+          showToast(`⚠️ ${json.error || "Failed to launch on PC"}`, "error");
+        }
+      } catch (err) {
+        showToast(`Error: ${err.message}`, "error");
+      } finally {
+        playOnPcBtn.disabled = false;
+        playOnPcBtn.innerHTML = `<span>🖥️ Play on PC Screen</span>`;
+      }
+    });
+  }
+
+  function closeMediaPlayer() {
+    const playerModal = document.getElementById("modal-media-player");
+    const videoEl = document.getElementById("media-html5-video");
+    const audioEl = document.getElementById("media-html5-audio");
+    if (videoEl) {
+      videoEl.pause();
+      videoEl.src = "";
+    }
+    if (audioEl) {
+      audioEl.pause();
+      audioEl.src = "";
+    }
+    playerModal?.classList.add("hidden");
+    activePlayingMedia = null;
+  }
+
+  async function loadMediaLibrary(category = "all", targetFolder = null) {
+    const container = document.getElementById("media-grid-container");
+    const countsText = document.getElementById("media-counts-text");
+    if (container) {
+      container.innerHTML = `<div class="loading-text" style="grid-column: 1 / -1; padding: 24px 0;"><span class="spinner" style="margin: 0 auto 8px auto;"></span>Scanning PC media files...</div>`;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+    try {
+      const q = new URLSearchParams({ category, token: sessionToken || "" });
+      if (targetFolder) q.append("path", targetFolder);
+
+      const res = await fetch(`/api/media/library?${q.toString()}`, {
+        headers: { "X-Session-Token": sessionToken || "" },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      const data = await res.json();
+
+      if (!data.success) {
+        if (container) {
+          container.innerHTML = `
+            <div class="empty-state" style="grid-column: 1 / -1; padding: 32px 16px; text-align: center;">
+              <div style="font-size: 32px; margin-bottom: 8px;">⚠️</div>
+              <div style="font-size: 13px; font-weight: 700; color: var(--red); margin-bottom: 4px;">${data.error || "Could not load media"}</div>
+              <button class="btn btn-sm btn-tool" style="margin: 8px auto 0 auto;" onclick="loadMediaLibrary()">🔄 Try Again</button>
+            </div>
+          `;
+        }
+        return;
+      }
+
+      cachedMediaItems = data.items || [];
+
+      if (countsText && data.counts) {
+        countsText.textContent = `Found ${data.counts.video || 0} Videos • ${data.counts.audio || 0} Tracks • ${data.counts.image || 0} Photos`;
+      }
+
+      renderMediaFolders(data.folders || []);
+      filterAndRenderMediaItems();
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (container) {
+        const isTimeout = err.name === "AbortError";
+        container.innerHTML = `
+          <div class="empty-state" style="grid-column: 1 / -1; padding: 32px 16px; text-align: center;">
+            <div style="font-size: 32px; margin-bottom: 8px;">⚠️</div>
+            <div style="font-size: 13px; font-weight: 700; color: var(--red); margin-bottom: 4px;">${isTimeout ? "Scan timed out" : "Unable to reach PC Media Server"}</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 12px;">${isTimeout ? "Check PC load and try again" : err.message}</div>
+            <button class="btn btn-sm btn-tool" style="margin: 0 auto;" onclick="loadMediaLibrary()">🔄 Retry Scan</button>
+          </div>
+        `;
+      }
+    }
+  }
+
+  function renderMediaFolders(folders) {
+    const container = document.getElementById("media-folders-chips");
+    if (!container) return;
+    const allActive = !currentSelectedFolder ? "active" : "";
+    const allChip = `<button class="btn-folder-tag ${allActive}" onclick="window.filterMediaFolder(null)">📁 All Folders</button>`;
+    const chips = folders.map((f) => {
+      const isAct = currentSelectedFolder === f.path ? "active" : "";
+      return `<button class="btn-folder-tag ${isAct}" onclick="window.filterMediaFolder('${encodeURIComponent(f.path)}')">${f.icon || "📁"} ${escapeHtml(f.name)}</button>`;
+    }).join("");
+    container.innerHTML = allChip + chips;
+  }
+
+  window.filterMediaFolder = function (encodedPath) {
+    vibrate(10);
+    currentSelectedFolder = encodedPath ? decodeURIComponent(encodedPath) : null;
+    loadMediaLibrary(currentActiveMediaFilter, currentSelectedFolder);
+  };
+
+  function filterAndRenderMediaItems(searchQuery = "") {
+    const container = document.getElementById("media-grid-container");
+    if (!container) return;
+
+    let items = cachedMediaItems;
+    if (searchQuery) {
+      items = items.filter(
+        (it) => it.name.toLowerCase().includes(searchQuery) || it.title.toLowerCase().includes(searchQuery)
+      );
+    }
+
+    if (items.length === 0) {
+      container.innerHTML = `
+        <div style="grid-column: 1 / -1; text-align: center; padding: 32px 16px; color: var(--text-dim);">
+          <div style="font-size: 36px; margin-bottom: 8px;">🎬</div>
+          <p style="font-size: 13px; font-weight: 700; color: #fff;">No media files found</p>
+          <p style="font-size: 11px; margin-top: 4px;">Place .mp4, .mkv, .mp3 or photos in Videos, Music or Downloads folder</p>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = items.map((item) => {
+      const isVideo = item.type === "video";
+      const isAudio = item.type === "audio";
+      const isImage = item.type === "image";
+
+      const typeIcon = isVideo ? "🎬" : isAudio ? "🎵" : "🖼️";
+      const badgeColor = isVideo ? "var(--cyan)" : isAudio ? "var(--purple)" : "var(--green)";
+      const thumbUrl = `/api/media/thumbnail?path=${encodeURIComponent(item.path)}&token=${encodeURIComponent(sessionToken || "")}`;
+
+      return `
+        <div class="media-card" onclick="window.openMediaItem('${item.id}')" title="Play ${escapeHtml(item.name)}">
+          <div class="media-thumb-wrap">
+            <img src="${thumbUrl}" class="media-thumb-img" alt="${escapeHtml(item.title)}" loading="lazy" onerror="this.onerror=null; this.src=''; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+            <div style="display:none; width: 100%; height: 100%; align-items: center; justify-content: center; font-size: 32px; opacity: 0.35;">${typeIcon}</div>
+            <span class="media-type-badge" style="color: ${badgeColor};">${item.ext}</span>
+            <div class="media-play-overlay">
+              <span class="media-play-btn">${isVideo ? "▶" : isAudio ? "🎵" : "🔍"}</span>
+            </div>
+          </div>
+          <div class="media-card-body">
+            <span class="media-title" title="${escapeHtml(item.name)}">${escapeHtml(item.title || item.name)}</span>
+            <div class="media-meta">
+              <span>${item.size_formatted}</span>
+              <span>${escapeHtml(item.folder)}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  window.openMediaItem = function (itemId) {
+    vibrate(15);
+    const item = cachedMediaItems.find((it) => it.id === itemId);
+    if (!item) return;
+
+    activePlayingMedia = item;
+    const modal = document.getElementById("modal-media-player");
+    const titleEl = document.getElementById("player-media-title");
+    const subEl = document.getElementById("player-media-sub");
+    const iconEl = document.getElementById("player-media-icon");
+    const downloadBtn = document.getElementById("btn-download-media-direct");
+
+    const videoWrap = document.getElementById("player-video-viewport");
+    const audioWrap = document.getElementById("player-audio-viewport");
+    const imageWrap = document.getElementById("player-image-viewport");
+
+    const videoEl = document.getElementById("media-html5-video");
+    const audioEl = document.getElementById("media-html5-audio");
+    const imgEl = document.getElementById("media-lightbox-img");
+
+    if (titleEl) titleEl.textContent = item.name;
+    if (subEl) subEl.textContent = `${item.size_formatted} • ${item.ext} • ${item.folder}`;
+    if (iconEl) iconEl.textContent = item.type === "video" ? "🎬" : item.type === "audio" ? "🎵" : "🖼️";
+
+    const streamUrl = `/api/media/stream?path=${encodeURIComponent(item.path)}&token=${encodeURIComponent(sessionToken || "")}`;
+    if (downloadBtn) downloadBtn.href = streamUrl;
+
+    // Reset viewports
+    videoWrap?.classList.add("hidden");
+    audioWrap?.classList.add("hidden");
+    imageWrap?.classList.add("hidden");
+
+    if (videoEl) { videoEl.pause(); videoEl.src = ""; }
+    if (audioEl) { audioEl.pause(); audioEl.src = ""; }
+
+    if (item.type === "video") {
+      videoWrap?.classList.remove("hidden");
+      if (videoEl) {
+        videoEl.src = streamUrl;
+        videoEl.play().catch(() => {});
+      }
+    } else if (item.type === "audio") {
+      audioWrap?.classList.remove("hidden");
+      if (audioEl) {
+        audioEl.src = streamUrl;
+        audioEl.play().catch(() => {});
+      }
+    } else if (item.type === "image") {
+      imageWrap?.classList.remove("hidden");
+      if (imgEl) imgEl.src = streamUrl;
+    }
+
+    modal?.classList.remove("hidden");
+  };
+
+
+  // --- 7. Voice Assistant & Real-Time Speech-to-PC Dictation ---
+  let speechRecognizer = null;
+  let isVoiceListening = false;
+
+  function setupVoiceAssistant() {
+    const voiceBtn = document.getElementById("btn-voice-control");
+    const voiceModal = document.getElementById("modal-voice-assistant");
+    const closeBtn = document.getElementById("btn-close-voice-modal");
+    const toggleRecBtn = document.getElementById("btn-toggle-voice-recording");
+    const statusLabel = document.getElementById("voice-status-label");
+    const transcriptBox = document.getElementById("voice-transcript-box");
+    const wave = document.getElementById("voice-mic-wave");
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      if (voiceBtn) {
+        voiceBtn.title = "Voice recognition not supported in this browser";
+        voiceBtn.style.opacity = "0.5";
+      }
+    }
+
+    voiceBtn?.addEventListener("click", () => {
+      vibrate(15);
+      if (!SpeechRecognition) {
+        showToast("⚠️ Voice recognition is not supported in this browser. Use Chrome or Safari.", "error");
+        return;
+      }
+      voiceModal?.classList.remove("hidden");
+      startVoiceListening();
+    });
+
+    closeBtn?.addEventListener("click", () => {
+      stopVoiceListening();
+      voiceModal?.classList.add("hidden");
+    });
+
+    voiceModal?.addEventListener("click", (e) => {
+      if (e.target === voiceModal) {
+        stopVoiceListening();
+        voiceModal.classList.add("hidden");
+      }
+    });
+
+    toggleRecBtn?.addEventListener("click", () => {
+      vibrate(15);
+      if (isVoiceListening) {
+        stopVoiceListening();
+      } else {
+        startVoiceListening();
+      }
+    });
+
+    function startVoiceListening() {
+      if (!SpeechRecognition) return;
+      try {
+        if (speechRecognizer) {
+          try { speechRecognizer.abort(); } catch (e) {}
+        }
+        speechRecognizer = new SpeechRecognition();
+        speechRecognizer.continuous = true;
+        speechRecognizer.interimResults = true;
+        speechRecognizer.lang = "en-IN";
+
+        speechRecognizer.onstart = () => {
+          isVoiceListening = true;
+          if (statusLabel) statusLabel.textContent = "🎙️ Listening... Speak now";
+          if (transcriptBox) transcriptBox.textContent = "Listening to speech...";
+          if (wave) {
+            wave.style.opacity = "1";
+            wave.classList.add("pulse-wave-anim");
+          }
+          if (toggleRecBtn) toggleRecBtn.style.background = "linear-gradient(135deg, #ef4444, #f43f5e)";
+        };
+
+        speechRecognizer.onresult = (e) => {
+          let interim = "";
+          let finalTranscript = "";
+          for (let i = e.resultIndex; i < e.results.length; ++i) {
+            if (e.results[i].isFinal) {
+              finalTranscript += e.results[i][0].transcript;
+            } else {
+              interim += e.results[i][0].transcript;
+            }
+          }
+          const text = finalTranscript || interim;
+          if (transcriptBox && text) {
+            transcriptBox.textContent = `"${text.trim()}"`;
+          }
+          if (finalTranscript) {
+            handleVoiceCommand(finalTranscript.trim());
+          }
+        };
+
+        speechRecognizer.onerror = (e) => {
+          console.warn("[Speech] Error:", e.error);
+          if (e.error === "not-allowed") {
+            if (statusLabel) statusLabel.textContent = "⚠️ Microphone permission denied";
+          } else {
+            if (statusLabel) statusLabel.textContent = `Speech error: ${e.error}`;
+          }
+          stopVoiceListening();
+        };
+
+        speechRecognizer.onend = () => {
+          if (isVoiceListening) {
+            try { speechRecognizer.start(); } catch (err) { stopVoiceListening(); }
+          }
+        };
+
+        speechRecognizer.start();
+      } catch (err) {
+        console.error("[Speech Start Error]:", err);
+        stopVoiceListening();
+      }
+    }
+
+    function stopVoiceListening() {
+      isVoiceListening = false;
+      if (speechRecognizer) {
+        try { speechRecognizer.stop(); } catch (e) {}
+      }
+      if (statusLabel) statusLabel.textContent = "Tap Mic to Speak";
+      if (wave) {
+        wave.style.opacity = "0";
+        wave.classList.remove("pulse-wave-anim");
+      }
+      if (toggleRecBtn) toggleRecBtn.style.background = "linear-gradient(135deg, #0ea5e9, #38bdf8)";
+    }
+
+    function handleVoiceCommand(raw) {
+      vibrate([20, 20]);
+      const lower = raw.toLowerCase().trim();
+
+      if (lower.includes("open chrome") || lower.includes("open browser") || lower.includes("chrome kholo")) {
+        sendWS("app:launch", { app_key: "chrome" });
+        showVoiceFeedback("🚀 Opened Google Chrome");
+      } else if (lower.includes("open youtube") || lower.includes("youtube kholo") || lower.includes("play youtube")) {
+        sendWS("app:launch", { app_key: "youtube" });
+        showVoiceFeedback("▶️ Opened YouTube");
+      } else if (lower.includes("open vscode") || lower.includes("open code") || lower.includes("code kholo")) {
+        sendWS("app:launch", { app_key: "vscode" });
+        showVoiceFeedback("💻 Opened VS Code");
+      } else if (lower.includes("open notepad") || lower.includes("notepad kholo")) {
+        sendWS("app:launch", { app_key: "notepad" });
+        showVoiceFeedback("📝 Opened Notepad");
+      } else if (lower.includes("open calculator") || lower.includes("calculator kholo") || lower.includes("calc")) {
+        sendWS("app:launch", { app_key: "calc" });
+        showVoiceFeedback("🔢 Opened Calculator");
+      } else if (lower.includes("open files") || lower.includes("open explorer") || lower.includes("explorer kholo")) {
+        sendWS("app:launch", { app_key: "explorer" });
+        showVoiceFeedback("📁 Opened File Explorer");
+      } else if (lower.includes("task manager") || lower.includes("taskmgr")) {
+        sendWS("app:launch", { app_key: "taskmgr" });
+        showVoiceFeedback("📊 Opened Task Manager");
+      } else if (lower.includes("lock pc") || lower.includes("lock computer") || lower.includes("pc lock")) {
+        sendWS("system:action", { action: "lock" });
+        showVoiceFeedback("🔒 Locked PC");
+      } else if (lower.includes("mute") || lower.includes("unmute") || lower.includes("awaaz band")) {
+        sendWS("keyboard:shortcut", { shortcut: "volume_mute" });
+        showVoiceFeedback("🔇 Toggled Mute");
+      } else if (lower.includes("volume up") || lower.includes("awaaz badhao") || lower.includes("increase volume")) {
+        sendWS("keyboard:shortcut", { shortcut: "volume_up" });
+        sendWS("keyboard:shortcut", { shortcut: "volume_up" });
+        showVoiceFeedback("🔊 Volume Up");
+      } else if (lower.includes("volume down") || lower.includes("awaaz kam") || lower.includes("decrease volume")) {
+        sendWS("keyboard:shortcut", { shortcut: "volume_down" });
+        sendWS("keyboard:shortcut", { shortcut: "volume_down" });
+        showVoiceFeedback("🔉 Volume Down");
+      } else if (lower.includes("next song") || lower.includes("next track") || lower.includes("agla gana")) {
+        sendWS("keyboard:shortcut", { shortcut: "media_next" });
+        showVoiceFeedback("⏭️ Next Track");
+      } else if (lower.includes("play") || lower.includes("pause") || lower.includes("stop music") || lower.includes("gana roko")) {
+        sendWS("keyboard:shortcut", { shortcut: "media_play_pause" });
+        showVoiceFeedback("⏯️ Play / Pause");
+      } else if (lower.includes("boss key") || lower.includes("panic")) {
+        sendWS("system:action", { action: "panic" });
+        showVoiceFeedback("🚨 Boss Key Triggered");
+      } else if (lower.includes("screenshot") || lower.includes("take screenshot")) {
+        sendWS("keyboard:shortcut", { shortcut: "win+printscreen" });
+        showVoiceFeedback("📸 Screenshot Captured");
+      } else {
+        // Voice Dictation: Type directly into active PC text area!
+        sendWS("keyboard:type", { text: raw + " " });
+        showVoiceFeedback(`✍️ Typed to PC: "${raw}"`);
+      }
+    }
+
+    function showVoiceFeedback(msg) {
+      if (statusLabel) {
+        statusLabel.textContent = msg;
+        statusLabel.style.color = "var(--cyan)";
+      }
+      showToast(msg, "info");
+      setTimeout(() => {
+        if (statusLabel && isVoiceListening) {
+          statusLabel.textContent = "🎙️ Listening... Speak now";
+          statusLabel.style.color = "var(--text-main)";
+        }
+      }, 2200);
+    }
   }
 
 })();
