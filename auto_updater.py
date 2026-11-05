@@ -122,15 +122,41 @@ class AutoUpdater:
                 updater_bat = base_dir / "_apply_update.bat"
 
                 print(f"[*] Downloading new version from {url}...")
-                req = urllib.request.Request(url, headers={"User-Agent": "EasyConnect-AutoUpdater/2.0"})
-                with urllib.request.urlopen(req, timeout=30) as resp, open(temp_exe, "wb") as f:
-                    while True:
-                        chunk = resp.read(64 * 1024)
-                        if not chunk:
-                            break
-                        f.write(chunk)
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "*/*"
+                }
 
-                print("[*] Update downloaded successfully. Spawning restart script...")
+                download_ok = False
+                last_err = None
+                for attempt in range(1, 5):
+                    try:
+                        req = urllib.request.Request(url, headers=headers)
+                        with urllib.request.urlopen(req, timeout=60) as resp, open(temp_exe, "wb") as f:
+                            total = int(resp.headers.get("content-length", 0))
+                            done = 0
+                            last_log = time.time()
+                            while True:
+                                chunk = resp.read(128 * 1024)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                done += len(chunk)
+                                if time.time() - last_log > 1.5 and total > 0:
+                                    pct = (done / total) * 100
+                                    print(f"[*] Download progress: {done / (1024*1024):.1f}/{total / (1024*1024):.1f} MB ({pct:.0f}%)...", flush=True)
+                                    last_log = time.time()
+                        download_ok = True
+                        break
+                    except Exception as err:
+                        last_err = err
+                        print(f"[*] Download attempt {attempt}/4 failed ({err}). Retrying...", flush=True)
+                        time.sleep(3)
+
+                if not download_ok:
+                    raise last_err
+
+                print("[*] Update downloaded successfully (100%). Spawning restart script...")
                 audit_log.log("UPDATE_DOWNLOADED", "New version downloaded, restarting application", "AutoUpdater")
 
                 # Generate self-deleting batch updater script

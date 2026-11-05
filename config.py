@@ -38,7 +38,7 @@ HOST = "0.0.0.0"
 PORT = 8000
 SERVER_NAME = "EasyConnect Agent v2.1"
 APP_VERSION = "2.2.0"
-GITHUB_REPO = "khushal-jangid/pulse-remote-pc"
+GITHUB_REPO = "khushal-jangid/EasyConnect-"
 
 # Device Information
 DEVICE_ID = get_or_create_device_id()
